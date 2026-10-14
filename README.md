@@ -70,14 +70,16 @@ Say you want to move `C:\Users\me\OneDrive\Desktop\my-app` to `C:\Users\me\code\
    C:\Users\me\code\my-app"*.
 
    The destination can have a different name: move and rename at once (`...\Desktop\MyApp` → `...\code\my-app`), or
-   keep the same parent folder to only rename. A change of letter case alone (`MyApp` → `myapp`) is not supported.
+   keep the same parent folder to only rename. To change only the letter case, see
+   [Change the case of a folder name](#change-the-case-of-a-folder-name).
 
 4. **Review the dry run.** Claude first shows what would change (files, sessions, settings, open tabs) without
    touching anything, and asks you to confirm.
 5. **Confirm.** Claude runs the migration and then audits and repairs the moved project. Claude Code asks your
    permission for the migration command in every permission mode, auto mode included: a plugin hook requires it for
    every cc-move command that changes something (`migrate`, `undo`, `archive`, `relink`). At the end it gives you a summary: what moved, what was recreated, what to check.
-6. **Open the new folder in VS Code.** The Claude tabs you had open reappear and the session history is complete.
+6. **Open the new folder in VS Code** with *File > Open Folder* (not *Open Recent*, which still has the old path).
+   The Claude tabs you had open reappear and the session history is complete.
    VS Code asks whether you trust the folder; trusting the parent folder (`C:\Users\me\code`) once avoids the
    question for every project you move there.
 
@@ -86,6 +88,27 @@ To commit afterwards, open a new Claude Code session: during a migration a safet
 
 When you are sure everything works (cc-move suggests six months), delete the `archive-<date>-my-app` folder and the
 `cc-move` section of `my-app\CLAUDE.local.md`.
+
+### Change the case of a folder name
+
+To go from `C:\Users\me\code\MyApp` to `C:\Users\me\code\myapp` (or back), use the same command or words:
+
+```
+/cc-move:migrate C:\Users\me\code\MyApp C:\Users\me\code\myapp
+```
+
+Windows sees both names as the same folder, so cc-move detects it and **renames the folder in place**: nothing is
+copied, hashed or archived, and there is no phase 2, because nothing inside the project changes. It then gives the
+session folders, `~/.claude.json` and the prompt history the new case, and copies the VS Code state to the one
+VS Code uses for the new name. Renaming by hand keeps the sessions (Claude Code finds them regardless of case), but
+VS Code forgets the open Claude tabs: its per-folder state depends on the exact case of the path.
+
+The same checks apply: close the project's VS Code window and its Claude Code sessions first. Only the project
+folder's own name can change case; changing the case of a parent folder is refused, since it would affect every
+project inside it. `undo <new path>` gives the folder its old name back.
+
+Afterwards, open the folder with *File > Open Folder*. *Open Recent* keeps the old spelling: VS Code would open it
+under the old name, with the old state, and show the old case in the title.
 
 ### Several projects
 
@@ -142,8 +165,8 @@ At the end of a migration the script prints its full path (it lives inside the i
 |---|---|
 | `python <script> status` | Lists migrations and flags archives older than 6 months |
 | `python <script> verify --all` | Checks every migration and repairs the session links if something reverted them |
-| `python <script> undo <new path>` | Moves the sessions back and restores the original's name (the copy is kept) |
-| `python <script> archive <new path>` | Retries renaming the original if it was in use |
+| `python <script> undo <new path>` | Moves the sessions back and restores the original's name (the copy is kept). For a case-only rename, renames the folder back |
+| `python <script> archive <new path>` | Retries renaming the original if it was in use (not for case-only renames) |
 | `python <script> relink <old path> <new path>` | Re-applies only the session reassociation |
 
 Reports, the migration registry and progress files live in `%LOCALAPPDATA%\cc-move` (each migration has a
@@ -158,6 +181,7 @@ Reports, the migration registry and progress files live in `%LOCALAPPDATA%\cc-mo
 | `First close the VS Code window of this project` | Close that window (only that one) and try again. |
 | `The current directory is inside the source` | Start Claude Code in another folder, outside the project. |
 | `The destination already exists and is not an empty folder` | Choose a path that does not exist yet (an empty folder is fine). |
+| `The folder is already named ...` | A case-only rename where nothing changes in the project folder's own name: either it already has that name, or only a parent folder's case differs (not supported). |
 | `Could not rename ...` (archiving) | Something still uses the original folder (a terminal, an editor, an antivirus scan). Close it and run `archive`. |
 | `The copy does NOT match the source` | Nothing in Claude Code was changed. Look at `manifest-diff.txt` in the report folder; often a file changed during the copy. Try again with the project closed. |
 | `cc-move only works on Windows` / `needs Python 3.8` | See the requirements. If `python` is not found but `py` is, Claude uses `py -3`. |

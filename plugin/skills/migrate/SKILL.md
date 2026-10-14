@@ -36,7 +36,8 @@ hooks:
 # Move a project without losing its Claude Code sessions
 
 Arguments: `$ARGUMENTS` — the source folder, the destination folder and optionally `--with-deps`. If either path is
-missing, ask for it. The destination must not exist yet (or be an empty folder) and its parent must exist.
+missing, ask for it. The destination must not exist yet (or be an empty folder) and its parent must exist, except in
+a case-only rename (see below).
 
 The script is `${CLAUDE_SKILL_DIR}/scripts/cc_move.py`. Run it with the **Bash tool**, exactly as
 `python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py <command> …` (the dry run, `verify` and `status` are pre-approved in
@@ -92,6 +93,17 @@ The report is in `%LOCALAPPDATA%\cc-move\reports\<date>-<name>\`: `report.md` (r
 `report.json`, the manifests, `robocopy.log`, `progress.txt` and `venvs\*.freeze.txt` (packages of each virtual
 environment).
 
+## Case-only rename
+
+If the destination differs from the source only in letter case (`...\MyApp` → `...\myapp`, either direction), the
+same `migrate` command detects it and the dry run starts with `Case-only rename in place`. The script renames the
+folder in place (no copy, no hash, no archive, no `CLAUDE.local.md` note) and relinks the sessions,
+`~/.claude.json`, the history and the VS Code state to the new case. Use the same steps (close the project's VS Code
+window and sessions, dry run, confirm, run), then **skip phase 2**: nothing inside the project changes and Windows
+still resolves the old spelling. Just run `verify "<destination>"` and summarize for the user. Tell them to open the
+folder in VS Code with *File > Open Folder* (not *Open Recent*, which keeps the old spelling and would open the old
+state): the Claude tabs that were open should reappear.
+
 ## Phase 2 — audit
 
 Delegate the read-only audit to the **`auditor` subagent** (`cc-move:auditor`): give it the destination, the old
@@ -146,7 +158,8 @@ Changes stay **uncommitted** for the user to review.
 
 Tell the user to:
 
-1. Open the new folder in VS Code (in a new window). The Claude tabs that were open should reappear, and the
+1. Open the new folder in VS Code (in a new window) with *File > Open Folder*, not *Open Recent* (it still has the
+   old path). The Claude tabs that were open should reappear, and the
    session history should be complete. VS Code asks whether to trust the folder: trusting the destination's parent
    folder once avoids the question for every project moved there.
 2. Optionally run the `verify --all` command the script printed at the end, from a regular terminal. Users have
@@ -159,4 +172,4 @@ Tell the user to:
   the `cc-move` section of `CLAUDE.local.md`.
 - `relink "<source>" "<destination>"`: re-applies only the session reassociation (idempotent).
 - `undo "<destination>"`: moves the original and the sessions back to the old path. **Only if the user asks.** It
-  does not delete the copy.
+  does not delete the copy. For a case-only rename it renames the folder back.

@@ -45,6 +45,7 @@ tests/test_cc_move.py                  end-to-end tests on a synthetic project, 
 |---|---|
 | `cli.py` | commands and arguments |
 | `migrate.py` | phase 1 step by step (`Migration` class) |
+| `rename.py` | case-only rename in place (`CaseRename`, a `Migration` without copy, archive or note) |
 | `copying.py` | scan, SHA-256 manifest, robocopy, links |
 | `progress.py` | time-based progress lines and `progress.txt` |
 | `claude_state.py` | session folders, `~/.claude.json`, history, reassociation, open sessions and windows |
@@ -69,5 +70,11 @@ tests/test_cc_move.py                  end-to-end tests on a synthetic project, 
   the open tabs under `Anthropic.claude-code` → `panelTabSessions`.
 - Reported by users on GitHub (#86713, #96018) but **not reproduced** here: an open session rewriting
   `~/.claude.json` from memory when it closes. `verify --all` repairs it if it ever happens.
+- Case-only rename (verified 2026-10-14): `os.rename('demo', 'Demo')` works on NTFS; Claude Code keeps finding the
+  sessions (same session folder, NTFS ignores case) and creates no new `~/.claude.json` key, but VS Code's
+  `workspaceStorage` id changes (md5 includes the exact case), so the state must be copied. Every path comparison in
+  the code ignores case on purpose; the rewriter matches case-insensitively and counts only replacements that change
+  the text. `paths.full` expands 8.3 names with `GetLongPathNameW`, which returns the case on disk: never pass it the
+  requested new name of a case-only rename.
 - Right after closing a VS Code window, renaming its folder can fail for a few seconds ("Access denied");
   `finalize.archive_original` retries.
