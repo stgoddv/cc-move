@@ -190,6 +190,7 @@ def robocopy(tree, dst, log_path, progress):
             break
         progress.advance(copied_bytes(line))
     code = process.wait()
+    process.stdout.close()
     if code >= 8:  # robocopy uses 0-7 for success
         raise Abort(f"robocopy failed (code {code}); see {log_path}")
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1 — 2026-10-14
+
+- Paths given with 8.3 short names (`C:\Users\RUNNER~1\...`) are expanded to their long form, which is what Claude
+  Code and VS Code record. Before, such a path did not find the VS Code state of the folder (and failed the tests on
+  GitHub's Windows runners).
+- CI uses the current `actions/checkout` and `actions/setup-python`.
+
 ## 0.1.0 — 2026-10-14
 
 First version, tested on Windows 11 with Claude Code 2.1.299 and its VS Code extension.

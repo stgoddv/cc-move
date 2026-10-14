@@ -1,5 +1,6 @@
 """Windows paths: normalization, long paths and the folder name Claude Code uses."""
 
+import ctypes
 import os
 import re
 
@@ -7,8 +8,23 @@ from . import Abort
 
 
 def full(p):
-    """Absolute, normalized path without a trailing separator."""
-    return os.path.normpath(os.path.abspath(p))
+    """Absolute, normalized path without a trailing separator, with 8.3 short names expanded."""
+    p = os.path.normpath(os.path.abspath(p))
+    return expand_short_names(p) if "~" in p else p
+
+
+def expand_short_names(p):
+    """Expands 8.3 short names (RUNNER~1) in the existing part of `p`: Claude Code and VS Code record long ones."""
+    head, missing = p, []
+    while not os.path.exists(head):
+        head, name = os.path.split(head)
+        if not name:
+            return p
+        missing.append(name)
+    buffer = ctypes.create_unicode_buffer(32768)
+    if not ctypes.windll.kernel32.GetLongPathNameW(head, buffer, len(buffer)):
+        return p
+    return os.path.join(buffer.value, *reversed(missing))
 
 
 def long_path(p):

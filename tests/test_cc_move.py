@@ -4,6 +4,7 @@ Run from the repo root:  python -m unittest discover -s tests -v
 It does not touch the real ~/.claude: everything lives in a temporary folder.
 """
 
+import ctypes
 import datetime as dt
 import hashlib
 import io
@@ -192,7 +193,7 @@ class FixtureTestCase(unittest.TestCase):
     """Creates a new Fixture in a temporary folder for each test."""
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="ccmove-")
+        self.tmp = paths.full(tempfile.mkdtemp(prefix="ccmove-"))  # long names, as Claude Code records them
         self.f = Fixture(self.tmp)
         self.real_appdata = os.environ.get("APPDATA")
         os.environ["APPDATA"] = self.f.appdata  # the VS Code state is fake too
@@ -468,6 +469,22 @@ class EnvironmentTest(unittest.TestCase):
         self.assertIsNone(cc_move.environment_problem("win32", (3, 13)))
         self.assertIn("Windows", cc_move.environment_problem("linux", (3, 13)))
         self.assertIn("3.8", cc_move.environment_problem("win32", (3, 7)))
+
+
+class PathsTest(unittest.TestCase):
+    def test_short_names_are_expanded(self):
+        tmp = tempfile.mkdtemp(prefix="ccmove-short-")
+        long_dir = os.path.join(tmp, "a long folder name")
+        os.makedirs(long_dir)
+        try:
+            buffer = ctypes.create_unicode_buffer(32768)
+            ctypes.windll.kernel32.GetShortPathNameW(long_dir, buffer, len(buffer))
+            if "~" not in buffer.value:
+                self.skipTest("8.3 short names are disabled on this volume")
+            self.assertEqual(paths.full(buffer.value), paths.full(long_dir))
+            self.assertEqual(paths.full(os.path.join(buffer.value, "new")), os.path.join(paths.full(long_dir), "new"))
+        finally:
+            shutil.rmtree(tmp)
 
 
 class EditorStateTest(unittest.TestCase):
