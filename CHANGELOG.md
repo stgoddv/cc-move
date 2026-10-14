@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 — 2026-10-14
+
+- Backups of Claude Code's state are now one zip per migration, kept **30 days**. Each `migrate` deletes expired
+  backups and says so; `status` shows each backup's size and expiry. Before, every migration left an uncompressed
+  copy of the project's session folders forever (hundreds of MB for projects with long histories).
+- New `prune [--older-than DAYS] [--dry-run]` command to delete backups earlier. It also zips the folder backups left
+  by earlier versions (or deletes them once expired), and lists without touching anything else in the backups folder.
+  Like `migrate`, it asks for permission unless it is a dry run.
+- Fix: the skill's safety hook blocked any command with a shell variable (`du -sh "$LOCALAPPDATA/cc-move"`) for the
+  rest of the session. Claude Code runs an `if`-filtered hook anyway when the command has `$VAR`, `$(...)` or
+  backticks, and those hooks always blocked. A script now reads the command and blocks only real `git commit`,
+  `git push`, `npm publish` and deploy commands, in Bash and PowerShell.
+- Fix: updating a migration in the registry (archive, undo, prune) moved it to the end, which broke the order
+  `verify` relies on to follow later moves and renames.
+- Fix: `verify` no longer repairs while a Claude Code session is open in the project (rewriting a transcript that
+  a session is writing could lose its last lines); it says what is wrong and asks to close the session first.
+- Fix: `verify` no longer rewrites mentions of the old path that appear in transcripts after the migration: they
+  are conversation text (someone talking about the old path). It reports them and repairs only what Claude Code uses
+  to find the sessions (session folders, `~/.claude.json`, history).
+- The dry run shows the size of the session history to back up and rewrite; the skill runs large ones in the
+  background.
+
 ## 0.2.0 — 2026-10-14
 
 - Case-only renames (`MyApp` → `myapp`, either direction): `migrate` detects them and renames the folder in place,

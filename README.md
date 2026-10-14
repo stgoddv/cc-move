@@ -83,8 +83,9 @@ Say you want to move `C:\Users\me\OneDrive\Desktop\my-app` to `C:\Users\me\code\
    VS Code asks whether you trust the folder; trusting the parent folder (`C:\Users\me\code`) once avoids the
    question for every project you move there.
 
-To commit afterwards, open a new Claude Code session: during a migration a safety hook blocks `git commit`,
-`git push` and common deploy commands for the rest of that session.
+To commit afterwards, open a new Claude Code session: once `/cc-move:migrate` runs, a safety hook blocks
+`git commit`, `git push` and common deploy commands for the rest of that session (reloading the VS Code window
+also ends it). Other commands are not affected.
 
 When you are sure everything works (cc-move suggests six months), delete the `archive-<date>-my-app` folder and the
 `cc-move` section of `my-app\CLAUDE.local.md`.
@@ -124,7 +125,8 @@ moves them one at a time and stops at the first failure.
 2. Records the git status and the packages of each Python virtual environment.
 3. Hashes the source, copies it with robocopy, hashes the copy and compares both lists. **Any difference stops the
    migration** before Claude Code's state is touched.
-4. Backs up `~/.claude.json`, the prompt history and the session folders, then moves and rewrites them.
+4. Backs up `~/.claude.json`, the prompt history and the session folders in a zip kept 30 days (see
+   [Backups](#backups)), then moves and rewrites them.
 5. Copies the VS Code state of the folder to the one VS Code will use for the new path.
 6. Renames the original to `archive-<date>-<name>` and writes a short note in the project's `CLAUDE.local.md`
    (kept out of git through `.git/info/exclude`), so a future agent knows the folder was moved.
@@ -164,14 +166,27 @@ At the end of a migration the script prints its full path (it lives inside the i
 | Command | What it does |
 |---|---|
 | `python <script> status` | Lists migrations and flags archives older than 6 months |
-| `python <script> verify --all` | Checks every migration and repairs the session links if something reverted them |
+| `python <script> verify --all` | Checks every migration and repairs the session links if something reverted them (close the project's Claude Code sessions first) |
 | `python <script> undo <new path>` | Moves the sessions back and restores the original's name (the copy is kept). For a case-only rename, renames the folder back |
 | `python <script> archive <new path>` | Retries renaming the original if it was in use (not for case-only renames) |
 | `python <script> relink <old path> <new path>` | Re-applies only the session reassociation |
+| `python <script> prune [--older-than DAYS] [--dry-run]` | Deletes expired backups now (see below) |
 
 Reports, the migration registry and progress files live in `%LOCALAPPDATA%\cc-move` (each migration has a
-`report.md`), so they survive plugin updates and uninstalls. Backups of Claude Code's state go to
-`~/.claude/backups/cc-move/`.
+`report.md`), so they survive plugin updates and uninstalls.
+
+### Backups
+
+Before touching Claude Code's state, each migration saves `~/.claude.json`, the prompt history and the project's
+session folders in one zip in `~/.claude/backups/cc-move/`. It is a last resort in case rewriting the sessions went
+wrong in a way `verify` cannot see (`undo` does not need it), so it is kept **30 days**. Each `migrate` then deletes
+expired backups and says so; `status` shows each backup's size and expiry. `prune` deletes them earlier:
+`prune --older-than 7` deletes those at least 7 days old, `prune --older-than 0` all of them, and `--dry-run` shows
+what it would delete. Backups made by versions before 0.3.0 are folders; `prune` zips them (or deletes them if they
+have expired). Anything else in that folder is listed and left alone.
+
+To restore a backup by hand, close every Claude Code session and extract the zip: `claude.json` goes to
+`~/.claude.json`, `history.jsonl` to `~/.claude/history.jsonl` and `projects\<name>` to `~/.claude/projects\<name>`.
 
 ## Troubleshooting
 

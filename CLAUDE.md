@@ -12,7 +12,8 @@ plugin/.claude-plugin/plugin.json      plugin manifest (keep "version" in sync w
 plugin/skills/migrate/SKILL.md         /cc-move:migrate — the two-phase procedure the agent follows
 plugin/skills/migrate/scripts/         cc_move.py (entry point) and the ccmove package (phase 1)
 plugin/agents/auditor.md               read-only phase 2 auditor subagent
-plugin/hooks/                          hooks.json + confirm_changes.py: always ask before migrate/undo/archive/relink
+plugin/hooks/                          hooks.json + confirm_changes.py (always ask before migrate/undo/archive/relink/prune);
+                                       guard_migration.py (the skill's no-commit/no-deploy hook)
 tests/test_cc_move.py                  end-to-end tests on a synthetic project, ~/.claude and %APPDATA%
 ```
 
@@ -53,7 +54,8 @@ tests/test_cc_move.py                  end-to-end tests on a synthetic project, 
 | `editor_state.py` | VS Code per-folder state (`workspaceStorage`): open Claude tabs and the rest |
 | `project_info.py` | git, venvs, lockfiles and old paths written inside the project |
 | `finalize.py` | archiving the original and the `CLAUDE.local.md` note |
-| `registry.py` / `report.py` | `migrations.jsonl` and the reports |
+| `registry.py` / `report.py` | `migrations.jsonl` (chronological; `save` replaces in place) and the reports |
+| `backups.py` | zip backups of Claude Code's state, 30-day expiry, `prune` (also of pre-0.3 folder backups) |
 | `paths.py` | Windows path utilities |
 
 ## Verified storage details (Windows 11, Claude Code 2.1.299)
@@ -76,5 +78,10 @@ tests/test_cc_move.py                  end-to-end tests on a synthetic project, 
   the code ignores case on purpose; the rewriter matches case-insensitively and counts only replacements that change
   the text. `paths.full` expands 8.3 names with `GetLongPathNameW`, which returns the case on disk: never pass it the
   requested new name of a case-only rename.
+- Hooks (documented in hooks.md, verified 2026-10-14): an `if` pattern that names more than the command, such as
+  `Bash(git push *)`, runs the hook anyway when the command contains `$VAR`, `$(...)` or backticks. So hooks must
+  decide by reading the command (`guard_migration.py`), never block unconditionally behind an `if`.
+  `${CLAUDE_PLUGIN_ROOT}` is substituted in SKILL.md frontmatter hook commands. Skill hooks last until the session
+  ends; a VS Code window reload ends them.
 - Right after closing a VS Code window, renaming its folder can fail for a few seconds ("Access denied");
   `finalize.archive_original` retries.
