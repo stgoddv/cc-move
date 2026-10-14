@@ -66,10 +66,14 @@ Say you want to move `C:\Users\me\OneDrive\Desktop\my-app` to `C:\Users\me\code\
    /cc-move:migrate C:\Users\me\OneDrive\Desktop\my-app C:\Users\me\code\my-app
    ```
 
+   Or just ask in your own words: *"use cc-move to move C:\Users\me\OneDrive\Desktop\my-app to
+   C:\Users\me\code\my-app"*.
+
 4. **Review the dry run.** Claude first shows what would change (files, sessions, settings, open tabs) without
    touching anything, and asks you to confirm.
-5. **Confirm.** Claude runs the migration (Claude Code asks your permission for that command) and then audits and
-   repairs the moved project. At the end it gives you a summary: what moved, what was recreated, what to check.
+5. **Confirm.** Claude runs the migration and then audits and repairs the moved project. Claude Code asks your
+   permission for the migration command in every permission mode, auto mode included: a plugin hook requires it for
+   every cc-move command that changes something (`migrate`, `undo`, `archive`, `relink`). At the end it gives you a summary: what moved, what was recreated, what to check.
 6. **Open the new folder in VS Code.** The Claude tabs you had open reappear and the session history is complete.
    VS Code asks whether you trust the folder; trusting the parent folder (`C:\Users\me\code`) once avoids the
    question for every project you move there.

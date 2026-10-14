@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 — 2026-10-14
+
+- Claude can now start the `migrate` skill when you ask in your own words ("use cc-move to move X to Y"); before,
+  only typing `/cc-move:migrate` worked.
+- New plugin hook: Claude Code always asks your permission before a cc-move command that changes something
+  (`migrate`, `undo`, `archive`, `relink`), in every permission mode, auto mode included. The dry run, `verify` and
+  `status` still run without asking.
+
 ## 0.1.1 — 2026-10-14
 
 - Paths given with 8.3 short names (`C:\Users\RUNNER~1\...`) are expanded to their long form, which is what Claude

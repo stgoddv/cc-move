@@ -471,6 +471,31 @@ class EnvironmentTest(unittest.TestCase):
         self.assertIn("3.8", cc_move.environment_problem("win32", (3, 7)))
 
 
+class ConfirmHookTest(unittest.TestCase):
+    """The plugin hook makes Claude Code ask before any cc-move command that changes something."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(REPO, "plugin", "hooks"))
+        import confirm_changes
+        self.needs_approval = confirm_changes.needs_approval
+
+    def test_changing_commands_need_approval(self):
+        for command in (r'python C:/p/cc_move.py migrate "C:\a" "C:\b"',
+                        r'python C:/p/cc_move.py migrate "C:\a" "C:\b" --with-deps',
+                        r'python C:/p/cc_move.py --state-dir "C:\s" undo "C:\b"',
+                        r'cd C:\x && py -3 C:\p\cc_move.py archive "C:\b"',
+                        r'python C:/p/cc_move.py relink "C:\a" "C:\b"'):
+            self.assertTrue(self.needs_approval(command), command)
+
+    def test_read_only_commands_do_not(self):
+        for command in (r'python C:/p/cc_move.py migrate --dry-run "C:\a\archive" "C:\b"',
+                        r'python C:/p/cc_move.py migrate "C:\a" "C:\b" --dry-run',
+                        r'python C:/p/cc_move.py verify "C:\x\archive-2026-10-14-demo"',
+                        r'python C:/p/cc_move.py status',
+                        r'git mv migrate undo'):
+            self.assertFalse(self.needs_approval(command), command)
+
+
 class PathsTest(unittest.TestCase):
     def test_short_names_are_expanded(self):
         tmp = tempfile.mkdtemp(prefix="ccmove-short-")

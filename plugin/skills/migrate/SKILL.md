@@ -1,8 +1,7 @@
 ---
 name: migrate
-description: Move a project folder to a new path without losing its Claude Code sessions, settings and open VS Code tabs. Copies and verifies by hash, relinks the sessions, archives the original, then audits and repairs what the copy cannot carry over. Windows only.
+description: Move a project folder to a new path without losing its Claude Code sessions, settings and open VS Code tabs. Copies and verifies by hash, relinks the sessions, archives the original, then audits and repairs what the copy cannot carry over. Use when the user asks to move, migrate or relocate a project folder (or to use cc-move). Windows only.
 argument-hint: "<source> <destination> [--with-deps]"
-disable-model-invocation: true
 allowed-tools: Bash(python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py migrate --dry-run *) Bash(python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py verify *) Bash(python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py status)
 hooks:
   PreToolUse:
@@ -74,7 +73,8 @@ The migration has two phases:
    - By default `node_modules` and virtual environments are **not copied**. `--with-deps` copies them (and verifies
      them by hash). Use it only if the user asks, or suggest it when reinstalling is expensive or risky: big
      virtual environments (`torch`, CUDA), old dependencies, native builds. If you suggest it, ask.
-2. Ask the user to confirm, then run (this one asks for permission on purpose):
+2. Ask the user to confirm, then run it. The plugin's hook makes Claude Code ask the user's permission for this
+   command (and for `undo`, `archive` and `relink`) in every permission mode, auto mode included:
 
    `python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py migrate "<source>" "<destination>"`
 

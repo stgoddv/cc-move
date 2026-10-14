@@ -12,6 +12,7 @@ plugin/.claude-plugin/plugin.json      plugin manifest (keep "version" in sync w
 plugin/skills/migrate/SKILL.md         /cc-move:migrate — the two-phase procedure the agent follows
 plugin/skills/migrate/scripts/         cc_move.py (entry point) and the ccmove package (phase 1)
 plugin/agents/auditor.md               read-only phase 2 auditor subagent
+plugin/hooks/                          hooks.json + confirm_changes.py: always ask before migrate/undo/archive/relink
 tests/test_cc_move.py                  end-to-end tests on a synthetic project, ~/.claude and %APPDATA%
 ```
 
