@@ -19,7 +19,8 @@ from contextlib import redirect_stdout
 
 import _winapi
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO, "plugin", "skills", "migrate", "scripts"))
 from ccmove import cli, copying, editor_state, finalize, paths, progress, rewriter  # noqa: E402
 from ccmove.registry import Registry  # noqa: E402
 
