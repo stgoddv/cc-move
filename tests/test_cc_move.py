@@ -225,6 +225,23 @@ class RewriterTest(unittest.TestCase):
                          "file:///c%3A/U/Desktop/repos/A%20B/x.md")
         self.assertEqual(rw.sub(r'{"C:\\U\\ONEDRIVE\\DESKTOP\\A B":1}')[0], r'{"C:\\U\\DESKTOP\\REPOS\\A B":1}')
 
+    def test_case_only_rename_changes_every_form_and_counts_only_real_changes(self):
+        rw = rewriter.PathRewriter(r"C:\U\Desktop\Proj", r"C:\U\Desktop\proj")
+        cases = {
+            r"C:\U\Desktop\Proj\a": r"C:\U\Desktop\proj\a",
+            r"c:\\U\\Desktop\\Proj\\a": r"c:\\U\\Desktop\\proj\\a",
+            "C:/U/Desktop/Proj/a": "C:/U/Desktop/proj/a",
+            "cd /c/U/Desktop/Proj && ls": "cd /c/U/Desktop/proj && ls",
+            "file:///c%3A/U/Desktop/Proj/x.md": "file:///c%3A/U/Desktop/proj/x.md",
+            "C--U-Desktop-Proj/memory": "C--U-Desktop-proj/memory",
+        }
+        for before, after in cases.items():
+            self.assertEqual(rw.sub(before), (after, 1), before)
+        # The new path matches too (case is ignored), but replacing it with itself is not a change.
+        for text in (r"C:\U\Desktop\proj\a", r"C:\U\DESKTOP\PROJ", r"C:\U\Desktop\Proj2", r"C:\U\Desktop\Proj-old",
+                     "C--U-Desktop-Proj-old"):
+            self.assertEqual(rw.sub(text), (text, 0), text)
+
     def test_leaves_similar_paths_alone(self):
         rw = rewriter.PathRewriter(r"C:\U\OneDrive\Desktop\Proj", r"C:\U\Desktop\repos\Proj")
         for text in (r"C:\U\OneDrive\Desktop\Proj2", r"C:\U\OneDrive\Desktop\Proj-old\x",
@@ -320,6 +337,199 @@ class RenameTest(FixtureTestCase):
         archive = os.path.join(os.path.dirname(f.src), f"archive-{dt.date.today().isoformat()}-Proj")
         self.assertTrue(os.path.isdir(archive))
         self.assertEqual(f.run("verify", new), 0, f.output)
+
+
+class CaseRenameTest(FixtureTestCase):
+    """A change of case alone (Proj -> proj) renames the folder in place and relinks everything to the new case."""
+
+    def setUp(self):
+        super().setUp()
+        self.parent = os.path.dirname(self.f.src)
+        self.new = os.path.join(self.parent, "proj")
+
+    def rename(self):
+        self.assertEqual(self.f.run("migrate", self.f.src, self.new), 0, self.f.output)
+
+    def test_folder_and_sessions_get_the_new_case(self):
+        f = self.f
+        self.rename()
+        self.assertIn("proj", os.listdir(self.parent))
+        self.assertNotIn("Proj", os.listdir(self.parent))
+        self.assertEqual(read(os.path.join(self.new, "a.txt")), "hola\n")
+        new_dir_name = paths.project_dir_name(self.new)
+        dirs = os.listdir(f.projects)
+        self.assertTrue({new_dir_name, new_dir_name + "-sub"} <= set(dirs), dirs)
+        self.assertNotIn(f.src_dir_name, dirs)
+        transcript = os.path.join(f.projects, new_dir_name, f.transcript_name)
+        text = read(transcript)
+        self.assertNotIn(in_json(f.src) + "\\\\", text)
+        for present in (in_json(self.new) + "\\\\a.txt", git_bash(self.new) + "/sub", forward(self.new) + "/a.txt",
+                        in_json(f.sibling), "Proj.bak", new_dir_name + "/memory"):
+            self.assertIn(present, text)
+        self.assertEqual(int(os.stat(transcript).st_mtime), OLD_MTIME)
+        self.assertIn(in_json(self.new), read(os.path.join(f.projects, new_dir_name, UUID, "subagents", "agent-1.jsonl")))
+        self.assertIn("Rename complete", f.output)
+
+    def test_config_and_history_get_the_new_case(self):
+        f = self.f
+        self.rename()
+        config = read_json(f.config)
+        new = forward(self.new)
+        self.assertEqual(set(config["projects"]),
+                         {new[0].upper() + new[1:], new[0].lower() + new[1:], new + "/sub", forward(f.sibling)})
+        self.assertEqual(config["githubRepoPaths"], {"u/proj": [self.new], "u/other": [f.sibling]})
+        with open(f.history, encoding="utf-8") as fh:
+            self.assertEqual([json.loads(line)["project"] for line in fh], [self.new, f.sibling])
+
+    def test_editor_state_is_copied_to_the_new_id(self):
+        f = self.f
+        old_id = editor_state.workspace_id(f.src)
+        self.rename()
+        new_id = editor_state.workspace_id(self.new)
+        self.assertNotEqual(new_id, old_id)  # the id depends on the exact case of the path
+        storage = os.path.join(f.storage_root, new_id)
+        self.assertEqual(read_json(os.path.join(storage, "workspace.json")), {"folder": editor_state.folder_uri(self.new)})
+        self.assertTrue(editor_state.folder_uri(self.new).endswith("/proj"))
+        tabs = json.loads(f.editor_item(storage, editor_state.CLAUDE_EXTENSION_KEY))
+        self.assertEqual(tabs["panelTabSessions"][0]["title"], "Mi sesión")
+        self.assertEqual(tabs["log"], self.new)
+        self.assertEqual(json.loads(f.editor_item(f.old_storage, editor_state.CLAUDE_EXTENSION_KEY))["log"], f.src)
+
+    def test_nothing_is_archived_and_verify_passes(self):
+        f = self.f
+        self.rename()
+        self.assertFalse(os.path.exists(os.path.join(self.new, finalize.NOTE_FILE)))
+        self.assertFalse([n for n in os.listdir(self.parent) if n.startswith("archive-")])
+        record = f.record()
+        self.assertEqual((record["kind"], record["phase1"], record["phase2"]), ("case-rename", "ok", "n/a"))
+        self.assertEqual(f.run("verify", self.new), 0, f.output)
+        self.assertEqual(f.run("verify", "--all"), 0, f.output)
+        self.assertEqual(f.run("archive", self.new), 2)
+        self.assertEqual(f.run("status"), 0, f.output)
+
+    def test_siblings_are_not_touched(self):
+        f = self.f
+        before = {n: read(os.path.join(f.projects, n, "s.jsonl"))
+                  for n in (paths.project_dir_name(f.sibling), paths.project_dir_name(f.prefix_sibling))}
+        self.rename()
+        self.assertTrue({"Proj2", "Proj-old"} <= set(os.listdir(self.parent)))
+        for name, text in before.items():
+            self.assertEqual(read(os.path.join(f.projects, name, "s.jsonl")), text)
+
+    def test_renaming_back_is_not_reverted_by_verify_all(self):
+        f = self.f
+        self.rename()
+        self.assertEqual(f.run("migrate", self.new, f.src), 0, f.output)  # proj -> Proj again
+        self.assertEqual(f.run("verify", "--all"), 0, f.output)
+        self.assertIn("Later moved or renamed", f.output)
+        self.assertIn("Proj", os.listdir(self.parent))
+        self.assertIn(f.src_dir_name, os.listdir(f.projects))
+        self.assertIn(in_json(f.src) + "\\\\", read(os.path.join(f.projects, f.src_dir_name, f.transcript_name)))
+
+    def test_redo_after_undo_replaces_the_older_editor_state(self):
+        f = self.f
+        self.rename()
+        self.assertEqual(f.run("undo", self.new), 0, f.output)
+        # VS Code is used under the old name again: its state changes and becomes newer than the first copy.
+        con = sqlite3.connect(os.path.join(f.old_storage, "state.vscdb"))
+        tabs = json.dumps({"panelTabSessions": [{"sessionId": UUID, "title": "Nueva"}], "log": f.src})
+        con.execute("UPDATE ItemTable SET value = ? WHERE key = ?", (tabs, editor_state.CLAUDE_EXTENSION_KEY))
+        con.commit()
+        con.close()
+        later = os.path.getmtime(os.path.join(f.old_storage, "state.vscdb")) + 60
+        os.utime(os.path.join(f.old_storage, "state.vscdb"), (later, later))
+        self.rename()
+        storage = os.path.join(f.storage_root, editor_state.workspace_id(self.new))
+        tabs = json.loads(f.editor_item(storage, editor_state.CLAUDE_EXTENSION_KEY))
+        self.assertEqual(tabs["panelTabSessions"][0]["title"], "Nueva")
+        report_dir = f.record()["report_dir"]
+        self.assertTrue(os.path.isdir(os.path.join(report_dir, "replaced-editor-state", "Code")))
+        self.assertNotIn("WARNING", f.output)
+
+    def test_verify_does_not_relink_a_folder_renamed_by_hand(self):
+        f = self.f
+        self.rename()
+        os.rename(self.new, f.src)
+        self.assertEqual(f.run("verify", self.new), 1, f.output)
+        self.assertIn("on disk", f.output)
+        self.assertIn(paths.project_dir_name(self.new), os.listdir(f.projects))  # left as it was
+
+    def test_dry_run_says_in_place_and_changes_nothing(self):
+        f = self.f
+        self.assertEqual(f.run("migrate", "--dry-run", f.src, self.new), 0, f.output)
+        self.assertIn("Case-only rename in place: Proj -> proj", f.output)
+        self.assertIn("Mi sesión", f.output)
+        self.assertIn("Proj", os.listdir(self.parent))
+        self.assertIn(f.src_dir_name, os.listdir(f.projects))
+        self.assertEqual(Registry(f.state_dir).all(), [])
+
+    def test_undo_restores_the_old_case(self):
+        f = self.f
+        self.rename()
+        self.assertEqual(f.run("undo", self.new), 0, f.output)
+        self.assertIn("Proj", os.listdir(self.parent))
+        self.assertIn(f.src_dir_name, os.listdir(f.projects))
+        self.assertIn(in_json(f.src) + "\\\\", read(os.path.join(f.projects, f.src_dir_name, f.transcript_name)))
+        self.assertIn(forward(f.src), read_json(f.config)["projects"])
+        self.assertEqual(f.record()["phase1"], "undone")
+
+    def test_same_name_and_parent_case_are_refused(self):
+        f = self.f
+        self.assertEqual(f.run("migrate", f.src, f.src), 2)
+        self.assertIn("nothing to rename", f.output)
+        self.assertEqual(f.run("migrate", f.src, os.path.join(self.parent.upper(), "Proj")), 2)
+        self.assertIn("parent folder", f.output)
+        self.assertIn("Proj", os.listdir(self.parent))
+
+    def test_short_names_keep_the_requested_case(self):
+        f = self.f  # expanding an 8.3 name asks Windows, which answers with the case on disk ("Proj")
+        buffer = ctypes.create_unicode_buffer(32768)
+        ctypes.windll.kernel32.GetShortPathNameW(self.parent, buffer, len(buffer))
+        if "~" not in buffer.value:
+            self.skipTest("8.3 short names are disabled on this volume")
+        self.assertEqual(f.run("migrate", os.path.join(buffer.value, "Proj"), os.path.join(buffer.value, "proj")),
+                         0, f.output)
+        self.assertIn("proj", os.listdir(self.parent))
+        self.assertEqual(f.record()["dst"], self.new)
+        self.assertEqual(f.run("verify", self.new), 0, f.output)
+
+    def test_open_editor_window_blocks_the_rename(self):
+        f = self.f
+        lock = {"pid": os.getpid(), "workspaceFolders": [f.src], "ideName": "Visual Studio Code"}
+        write(os.path.join(f.claude, "ide", "1.lock"), json.dumps(lock))
+        self.assertEqual(f.run("migrate", f.src, self.new), 2)
+        self.assertIn("VS Code window", f.output)
+        self.assertIn("Proj", os.listdir(self.parent))
+
+
+class MoveThenCaseRenameTest(FixtureTestCase):
+    """A move (OneDrive\\...\\Proj -> repos\\Proj) followed by a case-only rename (repos\\Proj -> repos\\proj)."""
+
+    def setUp(self):
+        super().setUp()
+        f = self.f
+        self.final = os.path.join(os.path.dirname(f.dst), "proj")
+        self.assertEqual(f.run("migrate", f.src, f.dst), 0, f.output)
+        self.assertEqual(f.run("migrate", f.dst, self.final), 0, f.output)
+
+    def test_verify_all_repairs_the_original_path_to_the_final_name(self):
+        f = self.f
+        config = read_json(f.config)
+        config["projects"][forward(f.src)] = {"allowedTools": ["Z"]}  # as if a stale session wrote it back
+        write(f.config, json.dumps(config, indent=2))
+        self.assertEqual(f.run("verify", "--all"), 0, f.output)
+        keys = read_json(f.config)["projects"]
+        self.assertIn(forward(self.final), keys)
+        self.assertNotIn(forward(f.src), keys)
+        self.assertNotIn(forward(f.dst), keys)  # not the intermediate case either
+
+    def test_undo_twice_reaches_the_original(self):
+        f = self.f
+        self.assertEqual(f.run("undo", self.final), 0, f.output)  # proj -> Proj
+        self.assertIn("Proj", os.listdir(os.path.dirname(f.dst)))
+        self.assertEqual(f.run("undo", f.dst), 0, f.output)  # repos\Proj -> OneDrive\...\Proj
+        self.assertTrue(os.path.isdir(f.src))
+        self.assertIn(forward(f.src), read_json(f.config)["projects"])
 
 
 class MigrationTest(FixtureTestCase):

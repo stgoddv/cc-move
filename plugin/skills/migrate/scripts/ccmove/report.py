@@ -8,7 +8,17 @@ def write_report(report_dir, record, details):
     """Saves report.json and report.md in the report folder."""
     with open(os.path.join(report_dir, "report.json"), "w", encoding="utf-8") as f:
         json.dump(details, f, indent=2, ensure_ascii=False)
-    sections = [
+    if record.get("kind") == "case-rename":  # in place: nothing to review in phase 2
+        sections = [_summary(record, details), _editor_state(details), _warnings(details)]
+    else:
+        sections = _migration_sections(record, details)
+    with open(os.path.join(report_dir, "report.md"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(line for section in sections for line in section) + "\n")
+
+
+def _migration_sections(record, details):
+    """Sections of the report of a copy, including what phase 2 must review."""
+    return [
         _summary(record, details),
         _editor_state(details),
         ["", "## For phase 2"],
@@ -20,8 +30,6 @@ def write_report(report_dir, record, details):
         _warnings(details),
         ["", "## Phase 2 (filled in by the agent)", ""],
     ]
-    with open(os.path.join(report_dir, "report.md"), "w", encoding="utf-8", newline="\n") as f:
-        f.write("\n".join(line for section in sections for line in section) + "\n")
 
 
 def _summary(record, details):
@@ -30,7 +38,8 @@ def _summary(record, details):
         f"# cc-move: {os.path.basename(record['src'])} ({record['date']})", "",
         f"- Source: `{record['src']}`",
         f"- Destination: `{record['dst']}`",
-        f"- Archived original: `{record.get('archive') or '(pending)'}` — delete from {record['delete_after']}",
+        f"- Archived original: `{record.get('archive') or '(pending)'}` — delete from {record['delete_after']}"
+        if record.get("kind") != "case-rename" else "- Case-only rename in place: nothing was copied or archived",
         f"- Phase 1 status: **{record['phase1']}**" + (f" — {record['error']}" if record.get("error") else ""),
     ]
     if record.get("content_sha256"):

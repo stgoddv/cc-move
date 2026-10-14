@@ -13,7 +13,8 @@ import os
 import shutil
 
 from . import Abort
-from .paths import full, is_under, list_dir, match_case, project_dir_name, to_windows, write_text_atomic
+from .paths import (full, is_under, list_dir, match_case, project_dir_name, same_path, to_windows, unique_path,
+                    write_text_atomic)
 from .rewriter import PathRewriter, rewrite_dir
 
 # Above this length Claude Code truncates the name and adds an undocumented hash.
@@ -63,16 +64,24 @@ class ClaudeState:
         return found
 
     def planned_moves(self, src, dst):
-        """Pairs (current folder, new folder) of sessions. Aborts if something would prevent moving them."""
-        src_name, dst_name = project_dir_name(full(src)), project_dir_name(full(dst))
+        """Pairs (current folder, new folder) of sessions. Aborts if something would prevent moving them.
+
+        In a case-only rename (Proj -> proj) the new folder is the same one with another case; folders that
+        already have the new case are left out.
+        """
+        case_only = same_path(src, dst)
         moves = []
         for old in self.session_dirs(src):
-            new = dst_name + old[len(src_name):]  # keeps the suffix of the subfolders
-            new = match_case(new[0], old[0]) + new[1:]
+            new = moved_dir_name(old, src, dst)
+            if old == new:
+                continue
             if len(new) > MAX_DIR_NAME:
                 raise Abort(f"The session folder '{new}' exceeds {MAX_DIR_NAME} characters and Claude Code "
                             "would truncate it with an undocumented hash. Choose a shorter destination path.")
             if old.lower() == new.lower():
+                if case_only:
+                    moves.append((old, new))
+                    continue
                 raise Abort("The source and the destination produce the same session folder.")
             clashes = _clashing_files(self.project_path(old), self.project_path(new))
             if clashes:
@@ -167,7 +176,7 @@ class ClaudeState:
 
     def backup(self, dir_names, tag):
         """Copies ~/.claude.json, the history and the given session folders. Returns the folder."""
-        dest = os.path.join(self.backups, dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + tag)
+        dest = unique_path(os.path.join(self.backups, dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + tag))
         os.makedirs(dest)
         if os.path.isfile(self.config):
             shutil.copy2(self.config, os.path.join(dest, "claude.json"))
@@ -186,7 +195,9 @@ def relink(state, src, dst):
     moves = state.planned_moves(src, dst)
     before = {old: count_transcripts(state.project_path(old)) for old, _ in moves}
     for old, new in moves:
-        if os.path.exists(state.project_path(new)):
+        if old.lower() == new.lower():  # case-only rename: the same folder (NTFS ignores case)
+            os.rename(state.project_path(old), state.project_path(new))
+        elif os.path.exists(state.project_path(new)):
             _merge_move(state.project_path(old), state.project_path(new))
         else:
             os.rename(state.project_path(old), state.project_path(new))
@@ -210,7 +221,7 @@ def link_problems(state, src, dst):
     """What is missing for everything to point to `dst` (empty list = reassociation complete)."""
     rewriter = PathRewriter(src, dst)
     problems = []
-    leftover_dirs = state.session_dirs(src)
+    leftover_dirs = [d for d in state.session_dirs(src) if d != moved_dir_name(d, src, dst)]
     if leftover_dirs:
         problems.append(f"session folders of the old path still exist: {leftover_dirs}")
     for name in state.session_dirs(dst, also_under=(src,)):
@@ -227,6 +238,13 @@ def link_problems(state, src, dst):
 
 
 # ------------------------------------------------------------------------- helpers
+
+def moved_dir_name(old, src, dst):
+    """Name the session folder `old` of `src` gets for `dst`: keeps the subfolder suffix and the drive's case."""
+    src_name, dst_name = project_dir_name(full(src)), project_dir_name(full(dst))
+    new = dst_name + old[len(src_name):]
+    return match_case(new[0], old[0]) + new[1:]
+
 
 def read_session_cwd(session_dir):
     """First `cwd` that appears in the transcripts of a session folder (or None)."""

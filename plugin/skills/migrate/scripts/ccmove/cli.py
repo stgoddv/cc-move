@@ -8,9 +8,10 @@ import sys
 
 from . import Abort, log
 from .claude_state import ClaudeState, count_transcripts, link_problems, relink
-from .finalize import archive_original, write_note
+from .finalize import archive_original, rename_folder, write_note
 from .migrate import Migration
-from .paths import full
+from .paths import disk_case, full, is_under, same_path
+from .rename import CaseRename, is_case_rename
 from .progress import DEFAULT_INTERVAL
 from .registry import Registry
 
@@ -40,9 +41,10 @@ def main(argv=None):
 
 
 def cmd_migrate(args, state, registry):
-    """Full phase 1 (or only the preview with --dry-run)."""
-    migration = Migration(state, registry, args.state_dir, args.src, args.dst,
-                          with_deps=args.with_deps, progress_every=args.progress_every)
+    """Full phase 1 (or only the preview with --dry-run); a case-only rename is done in place."""
+    kind = CaseRename if is_case_rename(args.src, args.dst) else Migration
+    migration = kind(state, registry, args.state_dir, args.src, args.dst,
+                     with_deps=args.with_deps, progress_every=args.progress_every)
     if args.dry_run:
         migration.preview()
         return
@@ -73,14 +75,34 @@ def cmd_verify(args, state, registry):
     for record in records:
         if args.all:
             log(f"\n== {record['id']}")
-        failures += _verify(state, record)
+        failures += _verify(state, record, _final_destination(registry, record))
     return 1 if failures else 0
 
 
-def _verify(state, record):
-    """Verifies a migration. Open Claude sessions can undo the change in
-    ~/.claude.json when they close, so if it finds the old path it reassociates again."""
-    src, dst = record["src"], record["dst"]
+def _final_destination(registry, record):
+    """Where the project of `record` is now: follows the later migrations that started from its destination.
+
+    Verifying against the record's own destination would revert them: after Proj -> proj -> Proj, the first
+    rename would turn every 'Proj' back into 'proj'.
+    """
+    records = registry.all()
+    dst = record["dst"]
+    for later in records[[r["id"] for r in records].index(record["id"]) + 1:]:
+        if later["phase1"].startswith("ok") and same_path(later["src"], dst):
+            dst = later["dst"]
+    return dst
+
+
+def _verify(state, record, dst):
+    """Verifies a migration against the project's current path `dst`. Open Claude sessions can undo the change
+    in ~/.claude.json when they close, so if it finds the old path it reassociates again."""
+    src = record["src"]
+    if dst != record["dst"]:
+        log(f"Later moved or renamed: checking against {dst}")
+    if _is_case_rename(record):
+        problem = _case_rename_problem(dst)
+        if problem:  # relinking now would give the sessions a case the folder no longer has
+            return _report_problems([problem])
     problems = link_problems(state, src, dst)
     if problems:
         for p in problems:
@@ -91,16 +113,29 @@ def _verify(state, record):
     dirs = state.session_dirs(dst)
     log(f"Session folders of {dst}: " + (", ".join(
         f"{d} ({count_transcripts(state.project_path(d))} transcripts)" for d in dirs) or "none"))
-    if not record.get("archive"):
-        problems.append("the original has not been archived yet (use the archive command)")
-    elif not os.path.isdir(record["archive"]):
-        problems.append(f"the archived folder does not exist: {record['archive']}")
+    if not _is_case_rename(record):  # a rename has no archive; its name on disk was checked above
+        if not record.get("archive"):
+            problems.append("the original has not been archived yet (use the archive command)")
+        elif not os.path.isdir(record["archive"]):
+            problems.append(f"the archived folder does not exist: {record['archive']}")
     return _report_problems(problems)
+
+
+def _case_rename_problem(dst):
+    """Why the folder of a case-only rename no longer has the name it was given (None if it does)."""
+    if not os.path.isdir(dst):
+        return f"the folder does not exist: {dst}"
+    if disk_case(dst) != dst:
+        return (f"the folder is named {os.path.basename(disk_case(dst))} on disk, not {os.path.basename(dst)}; "
+                "the sessions were left as they are")
+    return None
 
 
 def cmd_archive(args, state, registry):
     """Retries renaming the original when it was in use before."""
     record = registry.find(args.path)
+    if _is_case_rename(record):
+        raise Abort("A case-only rename keeps the folder in place: there is nothing to archive.")
     if record.get("archive") and os.path.isdir(record["archive"]):
         log(f"Already archived: {record['archive']}")
         return
@@ -119,6 +154,8 @@ def cmd_archive(args, state, registry):
 def cmd_undo(args, state, registry):
     """Returns the original to its name and the sessions to the old path. Does not delete the copy."""
     record = registry.find(args.path)
+    if _is_case_rename(record):
+        return _undo_case_rename(state, registry, record)
     src, dst = record["src"], record["dst"]
     state.ensure_closed(dst)
     archive = record.get("archive")
@@ -135,6 +172,34 @@ def cmd_undo(args, state, registry):
     log("The VS Code state of the original path was never modified: when you open it, everything is as before.")
     if record.get("backup_dir"):
         log(f"Backup of the Claude Code state from before the migration: {record['backup_dir']}")
+
+
+def _undo_case_rename(state, registry, record):
+    """Gives the folder its old case back and returns the sessions to it."""
+    src, dst = record["src"], record["dst"]
+    if is_under(os.getcwd(), dst):
+        raise Abort("The current directory is inside the project; run the script from another folder.")
+    state.ensure_closed(dst)
+    state.ensure_no_editor_window(dst)
+    if disk_case(dst) == dst:
+        error = rename_folder(dst, src)
+        if error:
+            raise Abort(f"Could not rename {dst} back ({error}); the reassociation was not undone.")
+        log(f"Folder renamed back: {src}")
+    elif disk_case(dst) != src:
+        raise Abort(f"The folder is no longer named {dst} nor {src}; the reassociation was not undone.")
+    result = relink(state, dst, src)
+    log(f"Sessions returned to the original name: {[m['to'] for m in result['moved_dirs']]}")
+    record["phase1"] = "undone"
+    registry.save(record)
+    log("The VS Code state of the original name was never modified: when you open it, everything is as before.")
+    if record.get("backup_dir"):
+        log(f"Backup of the Claude Code state from before the rename: {record['backup_dir']}")
+
+
+def _is_case_rename(record):
+    """True if the registry record is a case-only rename in place (no copy, no archive)."""
+    return record.get("kind") == "case-rename"
 
 
 def cmd_phase2(args, state, registry):
@@ -155,9 +220,10 @@ def cmd_status(args, state, registry):
         log("There are no registered migrations.")
     for r in records:
         archived = bool(r.get("archive")) and os.path.isdir(r["archive"])
+        archive_text = "n/a (case-only rename)" if _is_case_rename(r) else "yes" if archived else "no"
         line = (f"{r['date']}  {os.path.basename(r['src']):24} phase1={r['phase1']:10} "
-                f"phase2={r['phase2']:8} archived={'yes' if archived else 'no'}")
-        if archived and today >= r["delete_after"]:
+                f"phase2={r['phase2']:8} archived={archive_text}")
+        if archived and r.get("delete_after") and today >= r["delete_after"]:
             line += f"  ** can be deleted from {r['delete_after']}: {r['archive']}"
         log(line)
 

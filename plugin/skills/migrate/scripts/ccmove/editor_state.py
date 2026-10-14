@@ -14,7 +14,7 @@ import shutil
 import sqlite3
 from urllib.parse import unquote
 
-from .paths import list_dir, same_path, strip_long_prefix
+from .paths import full, list_dir, same_path, strip_long_prefix
 from .rewriter import rewrite_dir, uri_quote
 
 # Editors with the same workspaceStorage format; only the installed ones are used.
@@ -53,15 +53,21 @@ def workspace_id(path):
     return hashlib.md5((vscode_path(path) + str(birth_ns // 1_000_000)).encode("utf-8")).hexdigest()
 
 
-def find_storage(root, path):
-    """State folder of `path` inside a workspaceStorage; if there are several, the most recently used."""
+def find_storage(root, path, exclude=None):
+    """State folder of `path` inside a workspaceStorage; if there are several, the one with the same case
+    (VS Code tells them apart) and then the most recently used.
+
+    `exclude` is the id of the destination: in a case-only rename it matches `path` too.
+    """
     candidates = []
     for name in list_dir(root):
+        if name == exclude:
+            continue
         storage = os.path.join(root, name)
         folder = _workspace_folder(storage)
         if folder and same_path(folder, path):
-            candidates.append(storage)
-    return max(candidates, key=_last_used, default=None)
+            candidates.append((folder[1:] == full(path)[1:], _last_used(storage), storage))
+    return max(candidates, default=(None,))[-1]
 
 
 def claude_tabs(storage):
@@ -74,33 +80,41 @@ def claude_tabs(storage):
     return [{"sessionId": t.get("sessionId"), "title": t.get("title")} for t in tabs if isinstance(t, dict)]
 
 
-def saved_states(src):
+def saved_states(src, exclude=None):
     """Per editor: the state folder of `src` and its Claude tabs (for the dry-run and the report)."""
     found = []
     for editor, root in storage_roots():
-        storage = find_storage(root, src)
+        storage = find_storage(root, src, exclude)
         if storage:
             found.append({"editor": editor, "storage": storage, "claude_tabs": claude_tabs(storage)})
     return found
 
 
-def copy_state(src, dst, rewriter):
+def copy_state(src, dst, rewriter, stale_dir=None):
     """Copies the state of each editor from `src` to the folder VS Code will use for `dst`.
 
-    It does not overwrite a new state that already exists (it means `dst` was already opened in the editor).
+    It does not overwrite a new state that already exists (it means `dst` was already opened in the editor),
+    unless `stale_dir` is given and that state is older than the source one: then it is moved there first.
+    That happens when a case-only rename is redone after an undo (the state of the first rename is left behind).
     Returns one result per editor with `status`: copied, skipped: … or failed: ….
     """
     new_id = workspace_id(dst)
     results = []
-    for item in saved_states(src):
+    for item in saved_states(src, exclude=new_id):
         target = os.path.join(os.path.dirname(item["storage"]), new_id)
         result = dict(item, target=target)
+        replaced = None
+        if os.path.exists(target) and stale_dir and _last_used(target) < _last_used(item["storage"]):
+            replaced = os.path.join(stale_dir, item["editor"])
+            os.makedirs(stale_dir, exist_ok=True)
+            shutil.move(target, replaced)
         if os.path.exists(target):
             result["status"] = "skipped: the new folder was already opened in this editor and has its own state"
         else:
             try:
                 _copy_storage(item["storage"], target, dst, rewriter)
-                result["status"] = "copied"
+                result["status"] = "copied" + (f" (an older state of the new name was moved to {replaced})"
+                                               if replaced else "")
             except (OSError, sqlite3.Error, ValueError) as e:
                 shutil.rmtree(target, ignore_errors=True)
                 result["status"] = f"failed: {e}"

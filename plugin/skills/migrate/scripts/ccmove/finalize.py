@@ -21,22 +21,28 @@ def archive_path(src, date):
     return candidate
 
 
-def archive_original(src, date, attempts=5, wait=2):
-    """Renames the original. Returns (new path, None) or (None, error) if Windows does not allow it.
+def archive_original(src, date):
+    """Renames the original. Returns (new path, None) or (None, error) if Windows does not allow it."""
+    target = archive_path(src, date)
+    error = rename_folder(src, target)
+    return (None, error) if error else (target, None)
+
+
+def rename_folder(src, target, attempts=5, wait=2):
+    """Renames a folder. Returns None, or the error if Windows does not allow it.
 
     Retries for a few seconds: after closing the project window, VS Code (or the Windows indexer)
     may take a while to release the folder and the first attempt fails with "Access denied".
     """
-    target = archive_path(src, date)
     for attempt in range(attempts):
         try:
             os.rename(src, target)
-            return target, None
+            return None
         except OSError as e:
             error = e
             if attempt < attempts - 1:
                 time.sleep(wait)
-    return None, str(error)
+    return str(error)
 
 
 def note_text(record):

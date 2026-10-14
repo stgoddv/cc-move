@@ -55,6 +55,16 @@ def same_path(a, b):
     return os.path.normcase(full(a)) == os.path.normcase(full(b))
 
 
+def disk_case(p):
+    """`p` with each existing folder spelled as it is on disk (the case the user typed may differ)."""
+    drive, rest = os.path.splitdrive(full(p))
+    current = drive + "\\"
+    for name in [x for x in rest.split("\\") if x]:
+        on_disk = [n for n in list_dir(current) if n.lower() == name.lower()]
+        current = os.path.join(current, on_disk[0] if len(on_disk) == 1 else name)
+    return current
+
+
 def is_under(p, root):
     """True if `p` is `root` or is inside it (case-insensitive)."""
     p, root = os.path.normcase(full(p)), os.path.normcase(full(root))
@@ -85,6 +95,14 @@ def list_dir(p):
         return os.listdir(p)
     except OSError:
         return []
+
+
+def unique_path(path):
+    """`path`, or `path-2`, `path-3`... if it already exists (case-insensitive, like Windows)."""
+    candidate, i = path, 2
+    while os.path.exists(candidate):
+        candidate, i = f"{path}-{i}", i + 1
+    return candidate
 
 
 def write_text_atomic(path, text):

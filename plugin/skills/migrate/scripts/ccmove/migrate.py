@@ -7,7 +7,7 @@ import shutil
 
 from . import Abort, copying, editor_state, finalize, log, progress, project_info
 from .claude_state import count_transcripts, link_problems, relink
-from .paths import full, is_under
+from .paths import full, is_under, unique_path
 from .report import write_report
 from .rewriter import PathRewriter, rewrite_dir
 
@@ -16,6 +16,8 @@ ARCHIVE_MONTHS = 6
 
 class Migration:
     """Migrates a project from `src` to `dst`. `preview()` shows the plan; `run()` executes it."""
+
+    DONE = "Phase 1 complete."
 
     def __init__(self, state, registry, state_dir, src, dst, with_deps=False,
                  progress_every=progress.DEFAULT_INTERVAL):
@@ -35,15 +37,7 @@ class Migration:
         self._prepare()
         self._show_dependency_sizes()
         log("\n[dry-run] What it would do:")
-        for old, _ in self.moves:
-            r = rewrite_dir(self.state.project_path(old), self.rewriter, dry=True)
-            log(f"  rewrite {r['replacements']} mentions of the path in {r['files']} files of projects/{old}")
-        for change in self.state.rewrite_config(self.rewriter, dry=True):
-            log(f"  ~/.claude.json  {change}")
-        log(f"  history.jsonl: {self.state.rewrite_history(self.rewriter, dry=True)} entries")
-        for item in editor_state.saved_states(self.src):
-            titles = ", ".join(f"\"{t['title']}\"" for t in item["claude_tabs"]) or "none"
-            log(f"  copy the {item['editor']} state to the new folder (Claude tabs: {titles})")
+        self._preview_claude_changes()
         log(f"  archive the original as {finalize.archive_path(self.src, self.date)}")
         log(f"  write the note in {os.path.join(self.dst, finalize.NOTE_FILE)}")
         warning = finalize.agents_md_warning(self.src)
@@ -55,21 +49,28 @@ class Migration:
         """Runs phase 1. Nothing of Claude Code is touched until the copy is verified."""
         self._prepare()
         self._check_disk_space()
+        # Three heavy stages go over every byte: hash the source, copy, hash the destination.
+        self._execute(3 * self.tree.bytes, [
+            self._record_venvs,
+            self._hash_source,
+            self._copy,
+            self._verify_copy,
+            self._relink_sessions,
+            self._restore_editor_state,
+            self._archive_original,
+            self._leave_note,
+        ])
+
+    def _execute(self, total_bytes, steps):
+        """Opens the report, runs the steps in order and always saves the report and the registry."""
         self._open_report()
         progress_file = os.path.join(self.report_dir, "progress.txt")
-        # Three heavy stages go over every byte: hash the source, copy, hash the destination.
-        self.progress = progress.Progress(3 * self.tree.bytes, self.progress_every, progress_file)
+        self.progress = progress.Progress(total_bytes, self.progress_every, progress_file)
         log(f"Progress (a line at most every {self.progress_every:g} s): {progress_file}")
         try:
-            self._record_venvs()
-            src_manifest = self._hash_source()
-            self._copy()
-            self._verify_copy(src_manifest)
-            self._relink_sessions()
-            self._restore_editor_state()
-            self._archive_original()
-            self._leave_note()
-            self.record["phase1"] = "ok" if self.record["archive"] else "ok (archive pending)"
+            for step in steps:
+                step()
+            self.record["phase1"] = self._final_status()
             self.progress.finish("phase 1 finished")
         except Exception as e:
             self.record["phase1"] = "failed"
@@ -79,24 +80,32 @@ class Migration:
         finally:
             write_report(self.report_dir, self.record, self.details)
             self.registry.save(self.record)
-        log(f"\nPhase 1 complete. Report: {os.path.join(self.report_dir, 'report.md')}")
+        log(f"\n{self.DONE} Report: {os.path.join(self.report_dir, 'report.md')}")
         for warning in self.details["warnings"]:
             log(f"WARNING: {warning}")
+
+    def _final_status(self):
+        """Phase 1 status once every step has run."""
+        return "ok" if self.record["archive"] else "ok (archive pending)"
+
+    def _preview_claude_changes(self):
+        """Dry-run lines for the session folders, ~/.claude.json, the history and the VS Code state."""
+        for name in self.state.session_dirs(self.src):  # also those that keep their name (case-only rename)
+            r = rewrite_dir(self.state.project_path(name), self.rewriter, dry=True)
+            log(f"  rewrite {r['replacements']} mentions of the path in {r['files']} files of projects/{name}")
+        for change in self.state.rewrite_config(self.rewriter, dry=True):
+            log(f"  ~/.claude.json  {change}")
+        log(f"  history.jsonl: {self.state.rewrite_history(self.rewriter, dry=True)} entries")
+        for item in editor_state.saved_states(self.src):
+            titles = ", ".join(f"\"{t['title']}\"" for t in item["claude_tabs"]) or "none"
+            log(f"  copy the {item['editor']} state to the new folder (Claude tabs: {titles})")
 
     # ---------------------------------------------------------------------- steps
 
     def _prepare(self):
         """Validates, plans the session move and scans the source."""
         self._validate()
-        self.moves = self.state.planned_moves(self.src, self.dst)
-        self.rewriter = PathRewriter(self.src, self.dst)
-        log(f"Source:      {self.src}\nDestination: {self.dst}")
-        for old, new in self.moves:
-            transcripts = count_transcripts(self.state.project_path(old))
-            log(f"Sessions: projects/{old} ({transcripts} transcripts) -> projects/{new}")
-        if not self.moves:
-            log("Sessions: there are no Claude Code sessions associated with this folder.")
-
+        self._plan_sessions()
         self.git = project_info.git_info(self.src)  # before the scan: afterwards the source must not change
         log("Scanning the source...")
         heartbeat = progress.Heartbeat("scanning the source", self.progress_every)
@@ -107,6 +116,17 @@ class Migration:
         if self.tree.deps:
             action = "copied" if self.with_deps else "not copied (--with-deps to copy them)"
             log(f"  dependencies, {action}: " + ", ".join(f"{rel} ({kind})" for rel, kind in self.tree.deps))
+
+    def _plan_sessions(self):
+        """Plans which session folders move and shows the paths and the sessions."""
+        self.moves = self.state.planned_moves(self.src, self.dst)
+        self.rewriter = PathRewriter(self.src, self.dst)
+        log(f"Source:      {self.src}\nDestination: {self.dst}")
+        for old, new in self.moves:
+            transcripts = count_transcripts(self.state.project_path(old))
+            log(f"Sessions: projects/{old} ({transcripts} transcripts) -> projects/{new}")
+        if not self.moves:
+            log("Sessions: no session folder to move (none, or they already have the new name).")
 
     def _show_dependency_sizes(self):
         """Size of each dependency folder, to decide whether --with-deps is worth it."""
@@ -123,22 +143,31 @@ class Migration:
     def _validate(self):
         """Checks that source and destination are usable and that no Claude sessions are open in the project."""
         src, dst = self.src, self.dst
-        if not os.path.isdir(src):
-            raise Abort(f"The source does not exist or is not a folder: {src}")
-        if os.lstat(src).st_file_attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
-            raise Abort(f"The source is a link or junction, not a real folder: {src}")
-        if os.path.basename(src).lower().startswith("archive-"):
-            raise Abort("The source is already an archived folder.")
+        self._validate_source()
         if os.path.exists(dst) and (not os.path.isdir(dst) or os.listdir(dst)):
             raise Abort(f"The destination already exists and is not an empty folder: {dst}")
         if not os.path.isdir(os.path.dirname(dst)):
             raise Abort(f"The parent folder of the destination does not exist: {os.path.dirname(dst)}")
         if is_under(dst, src) or is_under(src, dst):
             raise Abort("The source and the destination cannot be inside each other.")
-        if is_under(os.getcwd(), src):
+        self._ensure_project_closed()
+
+    def _validate_source(self):
+        """Aborts if the source is not a real, non-archived folder."""
+        src = self.src
+        if not os.path.isdir(src):
+            raise Abort(f"The source does not exist or is not a folder: {src}")
+        if os.lstat(src).st_file_attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
+            raise Abort(f"The source is a link or junction, not a real folder: {src}")
+        if os.path.basename(src).lower().startswith("archive-"):
+            raise Abort("The source is already an archived folder.")
+
+    def _ensure_project_closed(self):
+        """Aborts if this process, a Claude Code session or a VS Code window is using the source."""
+        if is_under(os.getcwd(), self.src):
             raise Abort("The current directory is inside the source; run the script from another folder.")
-        self.state.ensure_closed(src)
-        self.state.ensure_no_editor_window(src)
+        self.state.ensure_closed(self.src)
+        self.state.ensure_no_editor_window(self.src)
 
     def _check_disk_space(self):
         """Aborts if the destination disk does not have room for the copy (the original is kept)."""
@@ -150,27 +179,36 @@ class Migration:
     def _open_report(self):
         """Creates reports/<date>-<name>/ and the migration record."""
         name = os.path.basename(self.src)
-        self.report_dir = _unique_path(os.path.join(self.state_dir, "reports", f"{self.date}-{name}"))
+        self.report_dir = unique_path(os.path.join(self.state_dir, "reports", f"{self.date}-{name}"))
         os.makedirs(self.report_dir)
         self.record = {
             "id": os.path.basename(self.report_dir),
             "date": self.date,
             "src": self.src,
             "dst": self.dst,
+            **self._record_fields(),
+            "phase1": "in progress",
+            "report_dir": self.report_dir,
+        }
+        self.details = {**self._report_details(), "warnings": []}
+
+    def _record_fields(self):
+        """Fields of the registry record specific to a copy."""
+        return {
             "archive": None,
             "delete_after": _add_months(self.today, ARCHIVE_MONTHS).isoformat(),
             "with_deps": self.with_deps,
             "dep_dirs": [rel for rel, _ in self.tree.deps],
-            "phase1": "in progress",
             "phase2": "pending",
-            "report_dir": self.report_dir,
         }
-        self.details = {
+
+    def _report_details(self):
+        """What the report needs for phase 2."""
+        return {
             "git": self.git,
             "with_deps": self.with_deps,
             "deps": self.tree.deps,
             "lockfiles": project_info.lockfiles(self.tree),
-            "warnings": [],
         }
 
     def _record_venvs(self):
@@ -184,7 +222,7 @@ class Migration:
         lines = copying.manifest(self.tree, copying.hash_files(self.tree, self.progress, "hashing the source"))
         skipped = [] if self.with_deps else [f"X\t{rel}\t{kind}" for rel, kind in self.tree.deps]
         copying.write_lines(os.path.join(self.report_dir, "manifest-src.tsv"), lines + skipped)
-        return lines
+        self.src_manifest = lines
 
     def _copy(self):
         """Copies with robocopy and recreates the links."""
@@ -194,9 +232,10 @@ class Migration:
         created, failed = copying.recreate_links(self.tree, self.dst)
         self.details["links"] = {"created": created, "failed": failed}
 
-    def _verify_copy(self, src_manifest):
+    def _verify_copy(self):
         """Compares the destination manifest with the source one; any difference aborts."""
         log("Verifying the copy...")
+        src_manifest = self.src_manifest
         dst_tree = copying.scan(self.dst, self.with_deps, progress.Heartbeat("scanning the copy", self.progress_every))
         dst_manifest = copying.manifest(dst_tree, copying.hash_files(dst_tree, self.progress, "hashing the copy"))
         copying.write_lines(os.path.join(self.report_dir, "manifest-dst.tsv"), dst_manifest)
@@ -230,7 +269,7 @@ class Migration:
         """
         log("Restoring the VS Code state...")
         try:
-            results = editor_state.copy_state(self.src, self.dst, self.rewriter)
+            results = editor_state.copy_state(self.src, self.dst, self.rewriter, self._stale_editor_state_dir())
         except Exception as e:  # any surprise in the internal format must not undo a verified copy
             results = []
             self.details["warnings"].append(f"Could not restore the editor state: {type(e).__name__}: {e}")
@@ -239,9 +278,13 @@ class Migration:
             log("  there is no saved editor state for this folder")
         for r in results:
             log(f"  {r['editor']}: {r['status']} ({len(r['claude_tabs'])} Claude tabs)")
-            if r["status"] != "copied":
+            if not r["status"].startswith("copied"):
                 self.details["warnings"].append(f"State of {r['editor']}: {r['status']}. The Claude tabs "
                                                 "that were open are listed in the report.")
+
+    def _stale_editor_state_dir(self):
+        """Where an older state of the new folder may be moved to make room (None: never replace it)."""
+        return None
 
     def _archive_original(self):
         """Renames the original to archive-<date>-<name>; if it is in use, it stays pending."""
@@ -265,14 +308,6 @@ class Migration:
         warning = finalize.agents_md_warning(self.dst)
         if warning:
             self.details["warnings"].append(warning)
-
-
-def _unique_path(path):
-    """`path`, or `path-2`, `path-3`... if it already exists."""
-    candidate, i = path, 2
-    while os.path.exists(candidate):
-        candidate, i = f"{path}-{i}", i + 1
-    return candidate
 
 
 def _add_months(date, months):

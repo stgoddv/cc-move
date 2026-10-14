@@ -26,8 +26,11 @@ class Registry:
         write_text_atomic(self.path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
 
     def find(self, path):
-        """The most recent migration whose source, destination or archive is `path`."""
-        for record in reversed(self.all()):
-            if any(record.get(k) and same_path(record[k], path) for k in ("dst", "src", "archive")):
-                return record
-        raise Abort(f"No migration is registered for {path}")
+        """The most recent migration whose source, destination or archive is `path`, preferring those not undone
+        (after undoing a rename, `undo` must reach the migration before it)."""
+        matches = [r for r in self.all()
+                   if any(r.get(k) and same_path(r[k], path) for k in ("dst", "src", "archive"))]
+        if not matches:
+            raise Abort(f"No migration is registered for {path}")
+        active = [r for r in matches if r["phase1"] != "undone"]
+        return (active or matches)[-1]

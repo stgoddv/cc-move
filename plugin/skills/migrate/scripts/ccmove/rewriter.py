@@ -59,13 +59,25 @@ class PathRewriter:
         return any(n in low for n in self._needles)
 
     def sub(self, text):
-        """Returns (new text, number of replacements)."""
+        """Returns (new text, number of replacements that changed something).
+
+        Matching ignores case, so in a case-only rename (Proj -> proj) the new path matches too;
+        replacing it with itself is not counted, or the old path would never seem to be gone.
+        """
         if not self.might_match(text):
             return text, 0
         total = 0
+
+        def counted(replacement):
+            def apply(m):
+                nonlocal total
+                new = replacement(m)
+                total += new != m.group(0)
+                return new
+            return apply
+
         for regex, replacement in self.rules:
-            text, n = regex.subn(replacement, text)
-            total += n
+            text = regex.sub(counted(replacement), text)
         return text, total
 
 
