@@ -1,0 +1,517 @@
+"""End-to-end tests of cc-move on a synthetic project and a synthetic ~/.claude.
+
+Run from the repo root:  python -m unittest discover -s tests -v
+It does not touch the real ~/.claude: everything lives in a temporary folder.
+"""
+
+import datetime as dt
+import hashlib
+import io
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+
+import _winapi
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from ccmove import cli, copying, editor_state, finalize, paths, progress, rewriter  # noqa: E402
+from ccmove.registry import Registry  # noqa: E402
+
+UUID = "11111111-2222-3333-4444-555555555555"
+OLD_MTIME = 1_700_000_000
+
+
+def write(path, text="", binary=None):
+    """Creates a file (and its folders), accepting long paths."""
+    path = paths.long_path(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(binary if binary is not None else text.encode("utf-8"))
+
+
+def read(path):
+    """Contents of a text file, accepting long paths."""
+    with open(paths.long_path(path), encoding="utf-8") as f:
+        return f.read()
+
+
+def read_json(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def git_bash(p):
+    """'C:\\a\\b' -> '/c/a/b', as Git Bash writes paths."""
+    return "/" + p[0].lower() + p[2:].replace("\\", "/")
+
+
+def forward(p):
+    """'C:\\a\\b' -> 'C:/a/b', like the keys of ~/.claude.json."""
+    return p.replace("\\", "/")
+
+
+def in_json(p):
+    """How a path appears inside a JSON text (escaped backslashes)."""
+    return json.dumps(p)[1:-1]
+
+
+class Fixture:
+    """Test project with the hard cases and a ~/.claude that references it in every form."""
+
+    def __init__(self, tmp):
+        desktop = os.path.join(tmp, "OneDrive", "Desktop")
+        self.src = os.path.join(desktop, "Proj")
+        self.sibling = os.path.join(desktop, "Proj2")         # must not be touched
+        self.prefix_sibling = os.path.join(desktop, "Proj-old")  # shares the encoded prefix
+        self.external = os.path.join(tmp, "external")
+        self.dst = os.path.join(tmp, "Desktop", "repos", "Proj")
+        self.home = os.path.join(tmp, "home")
+        self.state_dir = os.path.join(tmp, "state")
+        for p in (os.path.dirname(self.dst), self.state_dir, self.sibling, self.prefix_sibling, self.external):
+            os.makedirs(p)
+        self.claude = os.path.join(self.home, ".claude")
+        self.projects = os.path.join(self.claude, "projects")
+        self.config = os.path.join(self.home, ".claude.json")
+        self.history = os.path.join(self.claude, "history.jsonl")
+        self.src_dir_name = paths.project_dir_name(self.src)
+        self.dst_dir_name = paths.project_dir_name(self.dst)
+        self.appdata = os.path.join(tmp, "appdata")
+        self.storage_root = os.path.join(self.appdata, "Code", "User", "workspaceStorage")
+        self._make_project()
+        self._make_claude_home()
+        self._make_editor_state()
+
+    def _make_project(self):
+        """Normal files, binary, empty folder, path >260, dependencies, junctions and git repo."""
+        s = self.src
+        write(os.path.join(s, "a.txt"), "hola\n")
+        write(os.path.join(s, "sub", "b.bin"), binary=os.urandom(300_000))
+        os.makedirs(os.path.join(s, "empty"))
+        deep = os.path.join(s, *(["carpeta-con-nombre-largo-0123456789"] * 8), "profundo.txt")
+        assert len(deep) > 260
+        self.deep_rel = os.path.relpath(deep, s)
+        write(deep, "ruta larga\n")
+        write(os.path.join(s, "node_modules", "x", "index.js"), "x\n")
+        write(os.path.join(s, "packages", "p", "node_modules", "y", "i.js"), "y\n")
+        write(os.path.join(s, "packages", "p", "package.json"), "{}\n")
+        write(os.path.join(s, "pnpm-lock.yaml"), "lock\n")
+        write(os.path.join(s, ".venv", "pyvenv.cfg"), "home = C:\\Python313\nversion = 3.13.7\n")
+        write(os.path.join(s, ".venv", "Lib", "site-packages", "foo-1.2.dist-info", "METADATA"), "m\n")
+        write(os.path.join(s, "config.txt"), f"data_dir = {s}\\data\n")
+        # Like pnpm: junction inside node_modules to a package of the repo itself.
+        _winapi.CreateJunction(os.path.join(s, "packages", "p"), os.path.join(s, "node_modules", "p"))
+        _winapi.CreateJunction(os.path.join(s, "sub"), os.path.join(s, "link_internal"))
+        _winapi.CreateJunction(self.external, os.path.join(s, "link_external"))
+        write(os.path.join(s, ".gitignore"), "node_modules/\n.venv/\n")
+        git = ["git", "-C", s, "-c", "core.autocrlf=false", "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run(git + ["init", "-q"], check=True)
+        subprocess.run(git + ["add", "a.txt", ".gitignore"], check=True)
+        subprocess.run(git + ["commit", "-qm", "init"], check=True)
+
+    def _make_claude_home(self):
+        """Transcripts, subagents, tool-results, memory, ~/.claude.json and history."""
+        s, sib = self.src, self.sibling
+        proj = os.path.join(self.projects, self.src_dir_name)
+        lines = [
+            {"type": "user", "cwd": s, "text": f"lee {s}\\a.txt y {sib}\\x.txt, también {git_bash(s)}/sub "
+                                               f"y {forward(s)}/a.txt."},
+            {"type": "tool", "nested": json.dumps({"path": s + "\\a.txt"}), "slug": self.src_dir_name + "/memory"},
+            {"type": "user", "cwd": git_bash(s), "text": f"fin de {s}. y {s}.bak queda igual"},
+        ]
+        self.transcript_name = UUID + ".jsonl"
+        transcript = os.path.join(proj, self.transcript_name)
+        write(transcript, "".join(json.dumps(x) + "\n" for x in lines))
+        os.utime(transcript, (OLD_MTIME, OLD_MTIME))
+        write(os.path.join(proj, UUID, "subagents", "agent-1.jsonl"), json.dumps({"cwd": s}) + "\n")
+        write(os.path.join(proj, UUID, "tool-results", "t.txt"), f"salida en {s}\\sub\n")
+        write(os.path.join(proj, "memory", "MEMORY.md"), f"- proyecto en `{s}`\n")
+        self._session_dir(self.src_dir_name + "-sub", s + "\\sub")  # sessions of a subfolder
+        self._session_dir(paths.project_dir_name(sib), sib)
+        self._session_dir(paths.project_dir_name(self.prefix_sibling), self.prefix_sibling)
+
+        config = {"numStartups": 3, "projects": {
+            forward(s)[0].upper() + forward(s)[1:]: {"allowedTools": ["A"], "hasTrustDialogAccepted": True},
+            forward(s)[0].lower() + forward(s)[1:]: {"allowedTools": [], "hasTrustDialogAccepted": True},
+            forward(s) + "/sub": {"allowedTools": []},
+            forward(sib): {"allowedTools": ["B"]},
+        }, "githubRepoPaths": {"u/proj": [s], "u/other": [sib]}}
+        write(self.config, json.dumps(config, indent=2))
+        history = [{"display": "x", "project": s}, {"display": "y", "project": sib}]
+        write(self.history, "".join(json.dumps(h) + "\n" for h in history))
+        os.makedirs(os.path.join(self.claude, "sessions"))
+
+    def _make_editor_state(self):
+        """VS Code state of the old folder: Claude tab, an open editor and Python data."""
+        self.old_storage = os.path.join(self.storage_root, "old-state")
+        uri = editor_state.folder_uri(self.src)
+        write(os.path.join(self.old_storage, "workspace.json"), json.dumps({"folder": uri}))
+        write(os.path.join(self.old_storage, "chatSessions", "c.jsonl"), json.dumps({"cwd": self.src}) + "\n")
+        rows = [
+            (editor_state.CLAUDE_EXTENSION_KEY,
+             json.dumps({"panelTabSessions": [{"sessionId": UUID, "title": "Mi sesión"}], "log": self.src})),
+            ("memento/workbench.editors.files.textFileEditor", json.dumps([[uri + "/a.txt", {}]])),
+            ("ms-python.python", json.dumps({self.src.upper(): True}).encode("utf-8")),  # BLOB, in upper case
+        ]
+        con = sqlite3.connect(os.path.join(self.old_storage, "state.vscdb"))
+        con.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)")
+        con.executemany("INSERT INTO ItemTable VALUES (?, ?)", rows)
+        con.commit()
+        con.close()
+
+    def editor_item(self, storage, key):
+        """Value (text) of a key in the state.vscdb of a state folder."""
+        con = sqlite3.connect(os.path.join(storage, "state.vscdb"))
+        value = con.execute("SELECT value FROM ItemTable WHERE key = ?", (key,)).fetchone()[0]
+        con.close()
+        return value if isinstance(value, str) else value.decode("utf-8")
+
+    def _session_dir(self, name, cwd):
+        """Session folder with a transcript whose cwd is `cwd`."""
+        write(os.path.join(self.projects, name, "s.jsonl"), json.dumps({"cwd": cwd}) + "\n")
+
+    def run(self, *args):
+        """Runs cc-move with this fake ~/.claude; stores the output in self.output."""
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = cli.main(["--claude-home", self.home, "--state-dir", self.state_dir, *args])
+        self.output = buf.getvalue()
+        return code
+
+    def record(self):
+        return Registry(self.state_dir).all()[-1]
+
+
+class FixtureTestCase(unittest.TestCase):
+    """Creates a new Fixture in a temporary folder for each test."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ccmove-")
+        self.f = Fixture(self.tmp)
+        self.real_appdata = os.environ.get("APPDATA")
+        os.environ["APPDATA"] = self.f.appdata  # the VS Code state is fake too
+
+    def tearDown(self):
+        if self.real_appdata is not None:
+            os.environ["APPDATA"] = self.real_appdata
+        shutil.rmtree(paths.long_path(self.tmp), ignore_errors=True)
+
+
+class RewriterTest(unittest.TestCase):
+    def test_replaces_every_form_of_the_path(self):
+        rw = rewriter.PathRewriter(r"C:\U\OneDrive\Desktop\Proj", r"C:\U\Desktop\repos\Proj")
+        cases = {
+            r"C:\U\OneDrive\Desktop\Proj": r"C:\U\Desktop\repos\Proj",
+            r"c:\U\OneDrive\Desktop\Proj\a.txt": r"c:\U\Desktop\repos\Proj\a.txt",
+            r"C:\\U\\OneDrive\\Desktop\\Proj\\a": r"C:\\U\\Desktop\\repos\\Proj\\a",
+            "C:/U/OneDrive/Desktop/Proj/a": "C:/U/Desktop/repos/Proj/a",
+            "cd /c/U/OneDrive/Desktop/Proj && ls": "cd /c/U/Desktop/repos/Proj && ls",
+            "c--U-OneDrive-Desktop-Proj/x": "c--U-Desktop-repos-Proj/x",
+            r"fin C:\U\OneDrive\Desktop\Proj.": r"fin C:\U\Desktop\repos\Proj.",
+        }
+        for before, after in cases.items():
+            self.assertEqual(rw.sub(before)[0], after, before)
+
+    def test_vscode_uri_and_uppercase_forms(self):
+        rw = rewriter.PathRewriter(r"C:\U\OneDrive\Desktop\A B", r"C:\U\Desktop\repos\A B")
+        self.assertEqual(rw.sub("file:///c%3A/U/OneDrive/Desktop/A%20B/x.md")[0],
+                         "file:///c%3A/U/Desktop/repos/A%20B/x.md")
+        self.assertEqual(rw.sub(r'{"C:\\U\\ONEDRIVE\\DESKTOP\\A B":1}')[0], r'{"C:\\U\\DESKTOP\\REPOS\\A B":1}')
+
+    def test_leaves_similar_paths_alone(self):
+        rw = rewriter.PathRewriter(r"C:\U\OneDrive\Desktop\Proj", r"C:\U\Desktop\repos\Proj")
+        for text in (r"C:\U\OneDrive\Desktop\Proj2", r"C:\U\OneDrive\Desktop\Proj-old\x",
+                     r"C:\U\OneDrive\Desktop\Proj.bak", "c--U-OneDrive-Desktop-Proj-old",
+                     r"D:\U\OneDrive\Desktop\Proj"):
+            self.assertEqual(rw.sub(text), (text, 0), text)
+
+
+class SafetyTest(FixtureTestCase):
+    def test_dry_run_changes_nothing(self):
+        f = self.f
+        self.assertEqual(f.run("migrate", f.src, f.dst, "--dry-run"), 0, f.output)
+        self.assertFalse(os.path.exists(f.dst))
+        self.assertTrue(os.path.isdir(os.path.join(f.projects, f.src_dir_name)))
+        self.assertIn("node_modules", f.output)
+
+    def test_dry_run_flag_can_go_before_the_paths(self):
+        f = self.f  # allows authorizing only "migrate --dry-run *" in allowed-tools
+        self.assertEqual(f.run("migrate", "--dry-run", f.src, f.dst), 0, f.output)
+        self.assertFalse(os.path.exists(f.dst))
+
+    def test_progress_lines_appear_when_the_interval_is_short(self):
+        f = self.f
+        self.assertEqual(f.run("migrate", "--progress-every", "0", f.src, f.dst), 0, f.output)
+        self.assertIn("% | hashing the source", f.output)
+        self.assertIn("% | hashing the copy", f.output)
+
+    def test_open_claude_session_blocks_migration(self):
+        f = self.f
+        write(os.path.join(f.claude, "sessions", "1.json"), json.dumps({"pid": os.getpid(), "cwd": f.src}))
+        self.assertEqual(f.run("migrate", f.src, f.dst), 2)
+        self.assertIn("open Claude Code sessions", f.output)
+        self.assertFalse(os.path.exists(f.dst))
+
+    def test_open_editor_window_blocks_migration(self):
+        f = self.f
+        lock = {"pid": os.getpid(), "workspaceFolders": [f.src], "ideName": "Visual Studio Code"}
+        write(os.path.join(f.claude, "ide", "1.lock"), json.dumps(lock))
+        self.assertEqual(f.run("migrate", f.src, f.dst), 2)
+        self.assertIn("VS Code window", f.output)
+        self.assertFalse(os.path.exists(f.dst))
+
+    def test_existing_editor_state_is_not_overwritten(self):
+        f = self.f
+        existing = os.path.join(f.storage_root, "already-opened")
+        write(os.path.join(existing, "marker.txt"), "estado propio")
+        real_workspace_id = editor_state.workspace_id
+        editor_state.workspace_id = lambda path: "already-opened"
+        try:
+            self.assertEqual(f.run("migrate", f.src, f.dst), 0, f.output)
+        finally:
+            editor_state.workspace_id = real_workspace_id
+        self.assertEqual(os.listdir(existing), ["marker.txt"])
+        report = read_json(os.path.join(f.record()["report_dir"], "report.json"))
+        self.assertTrue(report["editor_state"][0]["status"].startswith("skipped"))
+
+    def test_bad_copy_aborts_before_touching_claude(self):
+        f = self.f
+        real_robocopy = copying.robocopy
+
+        def robocopy_then_corrupt(tree, dst, log_path, progress):
+            real_robocopy(tree, dst, log_path, progress)
+            write(os.path.join(dst, "a.txt"), "alterado\n")
+
+        copying.robocopy = robocopy_then_corrupt
+        try:
+            self.assertEqual(f.run("migrate", f.src, f.dst), 2)
+        finally:
+            copying.robocopy = real_robocopy
+        self.assertIn("does NOT match", f.output)
+        self.assertTrue(os.path.isdir(f.src))
+        self.assertTrue(os.path.isdir(os.path.join(f.projects, f.src_dir_name)))
+        self.assertEqual(f.record()["phase1"], "failed")
+
+
+class MigrationTest(FixtureTestCase):
+    """Each test starts from a complete migration and checks one part of the result."""
+
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(self.f.run("migrate", self.f.src, self.f.dst), 0, self.f.output)
+        self.archive = os.path.join(os.path.dirname(self.f.src), f"archive-{dt.date.today().isoformat()}-Proj")
+
+    def test_small_repo_prints_no_progress_lines(self):
+        self.assertNotIn("% |", self.f.output)  # finished well before the first 60 s interval
+        progress_file = os.path.join(self.f.record()["report_dir"], "progress.txt")
+        self.assertIn("phase 1 finished", read(progress_file))
+
+    def test_copy_has_content_without_dependencies(self):
+        f = self.f
+        self.assertEqual(read(os.path.join(f.dst, "a.txt")), "hola\n")
+        self.assertTrue(os.path.exists(paths.long_path(os.path.join(f.dst, f.deep_rel))))
+        self.assertTrue(os.path.isdir(os.path.join(f.dst, "empty")))
+        self.assertTrue(os.path.isfile(os.path.join(f.dst, "packages", "p", "package.json")))
+        for excluded in ("node_modules", os.path.join("packages", "p", "node_modules"), ".venv"):
+            self.assertFalse(os.path.exists(os.path.join(f.dst, excluded)), excluded)
+
+    def test_links_are_recreated_and_internal_ones_remapped(self):
+        f = self.f
+
+        def target(name):
+            return paths.strip_long_prefix(os.readlink(os.path.join(f.dst, name)))
+
+        self.assertTrue(paths.same_path(target("link_internal"), os.path.join(f.dst, "sub")))
+        self.assertTrue(paths.same_path(target("link_external"), f.external))
+
+    def test_original_is_archived(self):
+        self.assertFalse(os.path.exists(self.f.src))
+        self.assertTrue(os.path.isdir(self.archive))
+
+    def test_sessions_are_moved_and_rewritten(self):
+        f = self.f
+        new_dir = os.path.join(f.projects, f.dst_dir_name)
+        self.assertFalse(os.path.exists(os.path.join(f.projects, f.src_dir_name)))
+        transcript = os.path.join(new_dir, f.transcript_name)
+        text = read(transcript)
+        for gone in ("OneDrive\\\\Desktop\\\\Proj\\\\", "OneDrive/Desktop/Proj/", f.src_dir_name + "/"):
+            self.assertNotIn(gone, text)
+        for present in (in_json(f.dst), git_bash(f.dst), in_json(f.sibling), "Proj.bak", f.dst_dir_name + "/memory"):
+            self.assertIn(present, text)
+        self.assertEqual(int(os.stat(transcript).st_mtime), OLD_MTIME)
+        self.assertIn(f.dst, read(os.path.join(new_dir, UUID, "tool-results", "t.txt")))
+        self.assertIn(f.dst, read(os.path.join(new_dir, "memory", "MEMORY.md")))
+
+    def test_subfolder_sessions_move_and_siblings_stay(self):
+        f = self.f
+        self.assertTrue(os.path.isdir(os.path.join(f.projects, f.dst_dir_name + "-sub")))
+        self.assertTrue(os.path.isdir(os.path.join(f.projects, paths.project_dir_name(f.sibling))))
+        self.assertTrue(os.path.isdir(os.path.join(f.projects, paths.project_dir_name(f.prefix_sibling))))
+
+    def test_config_and_history_point_to_new_path(self):
+        f = self.f
+        config = read_json(f.config)
+        keys = set(config["projects"])
+        new = forward(f.dst)
+        self.assertTrue({new[0].upper() + new[1:], new[0].lower() + new[1:], new + "/sub", forward(f.sibling)} <= keys)
+        self.assertNotIn(forward(f.src).lower(), {k.lower() for k in keys})
+        self.assertEqual(config["githubRepoPaths"], {"u/proj": [f.dst], "u/other": [f.sibling]})
+        with open(f.history, encoding="utf-8") as fh:
+            self.assertEqual([json.loads(line)["project"] for line in fh], [f.dst, f.sibling])
+
+    def test_note_report_and_registry(self):
+        f = self.f
+        note = read(os.path.join(f.dst, "CLAUDE.local.md"))
+        self.assertIn(finalize.NOTE_START, note)
+        self.assertIn(self.archive, note)
+        self.assertIn("CLAUDE.local.md", read(os.path.join(f.dst, ".git", "info", "exclude")))
+        status = subprocess.run(["git", "-C", f.dst, "status", "--porcelain"], capture_output=True, text=True)
+        self.assertNotIn("CLAUDE.local.md", status.stdout)
+        record = f.record()
+        self.assertEqual(record["phase1"], "ok")
+        report = read_json(os.path.join(record["report_dir"], "report.json"))
+        self.assertEqual([x["path"] for x in report["stale_refs"]], ["config.txt"])
+        self.assertEqual(report["venvs"][0]["python_version"], "3.13.7")
+        self.assertIn("pnpm-lock.yaml", report["lockfiles"])
+
+    def test_editor_state_is_copied_for_the_new_folder(self):
+        f = self.f
+        new_storage = os.path.join(f.storage_root, editor_state.workspace_id(f.dst))
+        self.assertEqual(read_json(os.path.join(new_storage, "workspace.json")),
+                         {"folder": editor_state.folder_uri(f.dst)})
+        tabs = json.loads(f.editor_item(new_storage, editor_state.CLAUDE_EXTENSION_KEY))
+        self.assertEqual(tabs["panelTabSessions"][0]["title"], "Mi sesión")
+        self.assertEqual(tabs["log"], f.dst)
+        memento = f.editor_item(new_storage, "memento/workbench.editors.files.textFileEditor")
+        self.assertIn(editor_state.folder_uri(f.dst) + "/a.txt", memento)
+        self.assertIn(in_json(f.dst.upper()), f.editor_item(new_storage, "ms-python.python"))
+        self.assertIn(in_json(f.dst), read(os.path.join(new_storage, "chatSessions", "c.jsonl")))
+        self.assertIn(in_json(f.src), f.editor_item(f.old_storage, editor_state.CLAUDE_EXTENSION_KEY))  # untouched
+        report_dir = f.record()["report_dir"]
+        self.assertEqual(read_json(os.path.join(report_dir, "report.json"))["editor_state"][0]["status"], "copied")
+        self.assertIn("Mi sesión", read(os.path.join(report_dir, "report.md")))
+
+    def test_verify_repairs_a_reverted_config(self):
+        f = self.f
+        self.assertEqual(f.run("verify", f.dst), 0, f.output)
+        config = read_json(f.config)
+        config["projects"][forward(f.src)] = {"allowedTools": ["Z"]}  # as if an open session rewrote it
+        write(f.config, json.dumps(config, indent=2))
+        self.assertEqual(f.run("verify", "--all"), 0, f.output)
+        self.assertNotIn(forward(f.src), read_json(f.config)["projects"])
+
+    def test_undo_restores_original_and_sessions(self):
+        f = self.f
+        self.assertEqual(f.run("undo", f.dst), 0, f.output)
+        self.assertTrue(os.path.isdir(f.src))
+        self.assertFalse(os.path.exists(self.archive))
+        transcript = os.path.join(f.projects, f.src_dir_name, f.transcript_name)
+        self.assertIn(in_json(f.src), read(transcript))
+        self.assertIn(forward(f.src), read_json(f.config)["projects"])
+        self.assertEqual(f.record()["phase1"], "undone")
+
+
+class FakeClock:
+    """Clock the tests move by hand."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+class ProgressTest(unittest.TestCase):
+    def test_prints_at_most_one_line_per_interval(self):
+        clock = FakeClock()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            p = progress.Progress(300_000_000, interval=60, clock=clock)
+            p.start_stage("copying", 100_000_000)
+            for _ in range(10):  # 10 updates within the first minute: no line
+                clock.now += 5
+                p.advance(1_000_000)
+            clock.now = 120
+            p.advance(50_000_000)  # one line
+            p.advance(1_000_000)  # same instant: no new line
+        lines = buf.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertEqual(lines[0], "  20% | copying 60 MB of 100 MB | 2 min elapsed, ~8 min left")
+
+    def test_heartbeat_reports_scans_once_per_interval(self):
+        clock = FakeClock()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            beat = progress.Heartbeat("scanning the source", interval=60, clock=clock)
+            for files in range(1, 1001):
+                clock.now = files * 0.15  # 150 s in total
+                beat(files)
+        self.assertEqual(buf.getvalue().splitlines(),
+                         ["  scanning the source: 400 files so far", "  scanning the source: 800 files so far"])
+
+    def test_copied_bytes_reads_robocopy_file_lines_in_any_language(self):
+        self.assertEqual(copying.copied_bytes("\t    Nuevo arch\t\t  123456\tC:\\a\\b.bin\r\n"), 123456)
+        self.assertEqual(copying.copied_bytes("\t    New File  \t\t       4\tC:\\a\\c.txt"), 4)
+        for other in ("", " Log File : C:\\x.txt", "    Bytes:    123460    123460         0", "-" * 78):
+            self.assertEqual(copying.copied_bytes(other), 0, other)
+
+
+class EnvironmentTest(unittest.TestCase):
+    def test_refuses_non_windows_and_old_python(self):
+        import cc_move
+        self.assertIsNone(cc_move.environment_problem("win32", (3, 13)))
+        self.assertIn("Windows", cc_move.environment_problem("linux", (3, 13)))
+        self.assertIn("3.8", cc_move.environment_problem("win32", (3, 7)))
+
+
+class EditorStateTest(unittest.TestCase):
+    def test_workspace_id_matches_vscode_formula(self):
+        folder = tempfile.mkdtemp(prefix="ccmove-id-")
+        try:
+            birth_ms = os.stat(folder).st_birthtime_ns // 1_000_000
+            path = editor_state.vscode_path(folder)
+            self.assertTrue(path[0].islower())
+            expected = hashlib.md5((path + str(birth_ms)).encode("utf-8")).hexdigest()
+            self.assertEqual(editor_state.workspace_id(folder), expected)
+        finally:
+            os.rmdir(folder)
+
+    def test_folder_uri_encodes_like_vscode(self):
+        folder = os.path.join(tempfile.mkdtemp(prefix="ccmove-uri-"), "A B")
+        os.makedirs(folder)
+        uri = editor_state.folder_uri(folder)
+        self.assertTrue(uri.startswith("file:///c%3A/"), uri)
+        self.assertTrue(uri.endswith("/A%20B"), uri)
+        shutil.rmtree(os.path.dirname(folder))
+
+
+class WithDepsTest(FixtureTestCase):
+    """--with-deps copies node_modules and venvs, and includes them in the hash verification."""
+
+    def test_dry_run_shows_dependency_sizes(self):
+        f = self.f
+        self.assertEqual(f.run("migrate", f.src, f.dst, "--dry-run"), 0, f.output)
+        self.assertIn("--with-deps to copy them", f.output)
+        self.assertIn("total:", f.output)
+
+    def test_dependencies_are_copied_and_pnpm_links_remapped(self):
+        f = self.f
+        self.assertEqual(f.run("migrate", f.src, f.dst, "--with-deps"), 0, f.output)
+        self.assertEqual(read(os.path.join(f.dst, "node_modules", "x", "index.js")), "x\n")
+        self.assertTrue(os.path.isfile(os.path.join(f.dst, ".venv", "pyvenv.cfg")))
+        link = paths.strip_long_prefix(os.readlink(os.path.join(f.dst, "node_modules", "p")))
+        self.assertTrue(paths.same_path(link, os.path.join(f.dst, "packages", "p")))
+        record = f.record()
+        self.assertTrue(record["with_deps"])
+        manifest = read(os.path.join(record["report_dir"], "manifest-src.tsv"))
+        self.assertIn("F\tnode_modules/x/index.js", manifest)
+        self.assertIn("copied as they were", read(os.path.join(f.dst, "CLAUDE.local.md")))
+
+
+if __name__ == "__main__":
+    unittest.main()

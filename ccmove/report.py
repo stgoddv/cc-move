@@ -1,0 +1,121 @@
+"""Report of each migration: report.json (complete) and report.md (readable, starting point for phase 2)."""
+
+import json
+import os
+
+
+def write_report(report_dir, record, details):
+    """Saves report.json and report.md in the report folder."""
+    with open(os.path.join(report_dir, "report.json"), "w", encoding="utf-8") as f:
+        json.dump(details, f, indent=2, ensure_ascii=False)
+    sections = [
+        _summary(record, details),
+        _editor_state(details),
+        ["", "## For phase 2"],
+        _dependencies(details),
+        _lockfiles(details),
+        _links(details),
+        _stale_refs(details),
+        _git(details),
+        _warnings(details),
+        ["", "## Phase 2 (filled in by the agent)", ""],
+    ]
+    with open(os.path.join(report_dir, "report.md"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(line for section in sections for line in section) + "\n")
+
+
+def _summary(record, details):
+    """Header: paths, status, hash and moved sessions."""
+    lines = [
+        f"# cc-move: {os.path.basename(record['src'])} ({record['date']})", "",
+        f"- Source: `{record['src']}`",
+        f"- Destination: `{record['dst']}`",
+        f"- Archived original: `{record.get('archive') or '(pending)'}` — delete from {record['delete_after']}",
+        f"- Phase 1 status: **{record['phase1']}**" + (f" — {record['error']}" if record.get("error") else ""),
+    ]
+    if record.get("content_sha256"):
+        lines.append(f"- Content hash (SHA-256 of the manifest): `{record['content_sha256']}` "
+                     f"({record['files']} files, {record['bytes'] / 1e9:.2f} GB)")
+    for move in (details.get("relink") or {}).get("moved_dirs", []):
+        lines.append(f"- Sessions: `projects/{move['from']}` → `projects/{move['to']}` "
+                     f"({move['transcripts']} transcripts)")
+    return lines
+
+
+def _editor_state(details):
+    """Result of copying the VS Code state and the Claude tabs that were open.
+    If the copy failed, this list lets you reopen them by hand from the session history."""
+    lines = ["", "## Editor state (VS Code)"]
+    results = details.get("editor_state") or []
+    if not results:
+        return lines + ["- there was no saved editor state for this folder"]
+    for r in results:
+        lines.append(f"- {r['editor']}: {r['status']} → `{r['target']}`")
+        lines += [f"    - Claude tab: \"{t['title']}\" (`{t['sessionId']}`)" for t in r["claude_tabs"]]
+    return lines
+
+
+def _dependencies(details):
+    """Dependency folders; for venvs, the Python version and the file with the packages."""
+    if details.get("with_deps"):
+        title = "### Dependencies copied with --with-deps (review; venvs have launchers with the old path)"
+    else:
+        title = "### Dependencies not copied (recreate)"
+    lines = ["", title]
+    venvs = {v["path"]: v for v in details.get("venvs", [])}
+    for rel, kind in details.get("deps", []):
+        v = venvs.get(rel)
+        if v:
+            lines.append(f"- `{rel}` — Python venv {v['python_version']} (home `{v['home']}`); "
+                         f"{v['packages']} packages in `{v['freeze_file']}` ({v['freeze_method']})")
+        else:
+            lines.append(f"- `{rel}` — {kind}")
+    if not details.get("deps"):
+        lines.append("- (none)")
+    return lines
+
+
+def _lockfiles(details):
+    """Lockfiles found, to know which manager to reinstall with."""
+    items = [f"- `{x}`" for x in details.get("lockfiles", [])]
+    return ["", "### Lockfiles and dependency manifests"] + (items or ["- (none)"])
+
+
+def _links(details):
+    """Links recreated and those that could not be created."""
+    links = details.get("links") or {}
+    created, failed = links.get("created", []), links.get("failed", [])
+    lines = ["", "### Links (junctions/symlinks)",
+             f"- Recreated: {len(created)} (repointed to the destination: {sum(1 for x in created if x['remapped'])})"]
+    lines += [f"- PENDING `{x['path']}` ({x['kind']} → `{x['target']}`): {x['error']}" for x in failed]
+    return lines
+
+
+def _stale_refs(details):
+    """Project files that still have the old path written in them."""
+    items = [f"- `{x['path']}` ({x['count']})" for x in details.get("stale_refs", [])]
+    return ["", "### Old paths written inside the project"] + (items or ["- (none)"])
+
+
+def _git(details):
+    """Git state before migrating, to compare it afterwards."""
+    git = details.get("git")
+    lines = ["", "### Git (before migrating)"]
+    if not git:
+        return lines + ["- not a git repo"]
+    status = git["status"].splitlines() if git["status"] and not git["status"].startswith("(error") else []
+    lines += [f"- HEAD `{git['head']}`, branch `{git['branch']}`",
+              f"- `git status --porcelain`: {len(status)} lines" + ("" if status else " (clean tree)")]
+    lines += [f"    {x}" for x in status[:50]]
+    if git["git_dir_is_file"]:
+        lines.append("- WARNING: `.git` is a file (worktree or submodule); check the path it contains.")
+    worktrees = (git["worktrees"] or "").splitlines()
+    if len(worktrees) > 1:
+        lines += ["- WARNING: there are additional worktrees:"] + [f"    {x}" for x in worktrees]
+    return lines
+
+
+def _warnings(details):
+    """General warnings of the migration."""
+    warnings = details.get("warnings") or []
+    return ["", "### Warnings"] + [f"- {w}" for w in warnings] if warnings else []

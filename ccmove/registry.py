@@ -1,0 +1,33 @@
+"""Migration registry (migrations.jsonl): one JSON line per migrated project."""
+
+import json
+import os
+
+from . import Abort
+from .paths import same_path, write_text_atomic
+
+
+class Registry:
+    """Reads and updates migrations.jsonl inside `state_dir`."""
+
+    def __init__(self, state_dir):
+        self.path = os.path.join(state_dir, "migrations.jsonl")
+
+    def all(self):
+        """All migrations, from oldest to newest."""
+        if not os.path.isfile(self.path):
+            return []
+        with open(self.path, encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def save(self, record):
+        """Adds or replaces (by `id`) a migration."""
+        records = [r for r in self.all() if r["id"] != record["id"]] + [record]
+        write_text_atomic(self.path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
+
+    def find(self, path):
+        """The most recent migration whose source, destination or archive is `path`."""
+        for record in reversed(self.all()):
+            if any(record.get(k) and same_path(record[k], path) for k in ("dst", "src", "archive")):
+                return record
+        raise Abort(f"No migration is registered for {path}")
