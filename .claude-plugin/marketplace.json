@@ -1,0 +1,15 @@
+{
+  "name": "cc-move",
+  "description": "Move a project folder without losing its Claude Code sessions",
+  "owner": {
+    "name": "stgoddv",
+    "url": "https://github.com/stgoddv"
+  },
+  "plugins": [
+    {
+      "name": "cc-move",
+      "source": "./plugin",
+      "description": "Move a project folder to a new path and bring its Claude Code sessions, settings and VS Code tabs along"
+    }
+  ]
+}
