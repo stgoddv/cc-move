@@ -69,6 +69,9 @@ Say you want to move `C:\Users\me\OneDrive\Desktop\my-app` to `C:\Users\me\code\
    Or just ask in your own words: *"use cc-move to move C:\Users\me\OneDrive\Desktop\my-app to
    C:\Users\me\code\my-app"*.
 
+   The destination can have a different name: move and rename at once (`...\Desktop\MyApp` → `...\code\my-app`), or
+   keep the same parent folder to only rename. A change of letter case alone (`MyApp` → `myapp`) is not supported.
+
 4. **Review the dry run.** Claude first shows what would change (files, sessions, settings, open tabs) without
    touching anything, and asks you to confirm.
 5. **Confirm.** Claude runs the migration and then audits and repairs the moved project. Claude Code asks your

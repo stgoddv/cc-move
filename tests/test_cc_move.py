@@ -300,6 +300,28 @@ class SafetyTest(FixtureTestCase):
         self.assertEqual(f.record()["phase1"], "failed")
 
 
+class RenameTest(FixtureTestCase):
+    """Moving and renaming at once (Proj -> my-proj) carries everything to the new name."""
+
+    def test_move_and_rename(self):
+        f = self.f
+        new = os.path.join(os.path.dirname(f.dst), "my-proj")
+        self.assertEqual(f.run("migrate", f.src, new), 0, f.output)
+        text = read(os.path.join(f.projects, paths.project_dir_name(new), f.transcript_name))
+        self.assertNotIn(in_json(f.src) + "\\\\", text)
+        for present in (in_json(new), git_bash(new), in_json(f.sibling), "Proj.bak"):
+            self.assertIn(present, text)
+        self.assertFalse(os.path.exists(os.path.join(f.projects, f.src_dir_name)))
+        self.assertIn(forward(new), read_json(f.config)["projects"])
+        with open(f.history, encoding="utf-8") as fh:
+            self.assertEqual([json.loads(line)["project"] for line in fh], [new, f.sibling])
+        storage = os.path.join(f.storage_root, editor_state.workspace_id(new))
+        self.assertEqual(read_json(os.path.join(storage, "workspace.json")), {"folder": editor_state.folder_uri(new)})
+        archive = os.path.join(os.path.dirname(f.src), f"archive-{dt.date.today().isoformat()}-Proj")
+        self.assertTrue(os.path.isdir(archive))
+        self.assertEqual(f.run("verify", new), 0, f.output)
+
+
 class MigrationTest(FixtureTestCase):
     """Each test starts from a complete migration and checks one part of the result."""
 
