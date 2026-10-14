@@ -6,8 +6,8 @@ import json
 import os
 import sys
 
-from . import Abort, log
-from .claude_state import ClaudeState, count_transcripts, link_problems, relink
+from . import Abort, backups, log
+from .claude_state import ClaudeState, count_transcripts, link_problems, relink, transcript_mentions
 from .finalize import archive_original, rename_folder, write_note
 from .migrate import Migration
 from .paths import disk_case, full, is_under, same_path
@@ -47,10 +47,34 @@ def cmd_migrate(args, state, registry):
                      with_deps=args.with_deps, progress_every=args.progress_every)
     if args.dry_run:
         migration.preview()
-        return
-    migration.run()
-    log("\nTo check it later from a normal terminal:")
-    log(f'  python "{SCRIPT}" verify --all')
+    else:
+        migration.run()
+    _prune_old_backups(registry, dry=args.dry_run)
+    if not args.dry_run:
+        log("\nTo check it later from a normal terminal:")
+        log(f'  python "{SCRIPT}" verify --all')
+
+
+def _prune_old_backups(registry, dry):
+    """After each migration: deletes expired backups and zips the folder backups of older versions."""
+    actions = backups.prune(registry, dt.date.today(), dry=dry)
+    if actions:
+        log(f"\nBackups of earlier migrations (kept {backups.BACKUP_DAYS} days):")
+        backups.report(actions, dry)
+
+
+def cmd_prune(args, state, registry):
+    """Deletes expired backups (or those older than --older-than days) and zips the remaining folder backups."""
+    actions = backups.prune(registry, dt.date.today(), args.older_than, args.dry_run)
+    if not actions:
+        log("Nothing to prune: no backup has expired and every backup is already a zip.")
+    backups.report(actions, args.dry_run)
+    others = backups.unreferenced(state, registry)
+    if others:
+        log("Not registered by cc-move, left alone:")
+        for path in others:
+            log(f"  {path}")
+    return 1 if any(a.get("error") for a in actions) else 0
 
 
 def cmd_relink(args, state, registry):
@@ -95,7 +119,12 @@ def _final_destination(registry, record):
 
 def _verify(state, record, dst):
     """Verifies a migration against the project's current path `dst`. Open Claude sessions can undo the change
-    in ~/.claude.json when they close, so if it finds the old path it reassociates again."""
+    in ~/.claude.json when they close, so if it finds the old path it reassociates again.
+
+    It repairs only what Claude Code uses to find the sessions (folders, ~/.claude.json, history), and only when no
+    session is open in the project: rewriting a transcript that a session is writing could lose its last lines.
+    Later mentions of the old path in transcripts are conversation text: reported, not rewritten.
+    """
     src = record["src"]
     if dst != record["dst"]:
         log(f"Later moved or renamed: checking against {dst}")
@@ -103,13 +132,19 @@ def _verify(state, record, dst):
         problem = _case_rename_problem(dst)
         if problem:  # relinking now would give the sessions a case the folder no longer has
             return _report_problems([problem])
-    problems = link_problems(state, src, dst)
+    problems = link_problems(state, src, dst, mentions=False)
     if problems:
         for p in problems:
             log(f"Detected: {p}")
+        try:
+            state.ensure_closed(src, dst)
+        except Abort as e:
+            return _report_problems(problems + [f"not repaired: {e}. Then run verify again."])
         log("Re-applying the reassociation...")
         relink(state, src, dst)
-        problems = link_problems(state, src, dst)
+        problems = link_problems(state, src, dst, mentions=False)
+    for note in transcript_mentions(state, src, dst):
+        log(f"Note: {note} (conversation text written after the migration; left as it is)")
     dirs = state.session_dirs(dst)
     log(f"Session folders of {dst}: " + (", ".join(
         f"{d} ({count_transcripts(state.project_path(d))} transcripts)" for d in dirs) or "none"))
@@ -170,8 +205,8 @@ def cmd_undo(args, state, registry):
     registry.save(record)
     log(f"The copy in {dst} was NOT deleted; delete it by hand if you no longer need it.")
     log("The VS Code state of the original path was never modified: when you open it, everything is as before.")
-    if record.get("backup_dir"):
-        log(f"Backup of the Claude Code state from before the migration: {record['backup_dir']}")
+    if backups.backup_of(record):
+        log(f"Backup of the Claude Code state from before the migration: {backups.backup_of(record)}")
 
 
 def _undo_case_rename(state, registry, record):
@@ -193,8 +228,8 @@ def _undo_case_rename(state, registry, record):
     record["phase1"] = "undone"
     registry.save(record)
     log("The VS Code state of the original name was never modified: when you open it, everything is as before.")
-    if record.get("backup_dir"):
-        log(f"Backup of the Claude Code state from before the rename: {record['backup_dir']}")
+    if backups.backup_of(record):
+        log(f"Backup of the Claude Code state from before the rename: {backups.backup_of(record)}")
 
 
 def _is_case_rename(record):
@@ -213,19 +248,28 @@ def cmd_phase2(args, state, registry):
 
 
 def cmd_status(args, state, registry):
-    """Lists the migrations and marks the archives that have reached their deadline."""
+    """Lists the migrations, their backups and the archives that have reached their deadline."""
     today = dt.date.today().isoformat()
     records = registry.all()
     if not records:
         log("There are no registered migrations.")
     for r in records:
         archived = bool(r.get("archive")) and os.path.isdir(r["archive"])
-        archive_text = "n/a (case-only rename)" if _is_case_rename(r) else "yes" if archived else "no"
+        archive_text = "n/a (rename)" if _is_case_rename(r) else "yes" if archived else "no"
         line = (f"{r['date']}  {os.path.basename(r['src']):24} phase1={r['phase1']:10} "
-                f"phase2={r['phase2']:8} archived={archive_text}")
+                f"phase2={r['phase2']:8} archived={archive_text:12} backup={_backup_text(r)}")
         if archived and r.get("delete_after") and today >= r["delete_after"]:
             line += f"  ** can be deleted from {r['delete_after']}: {r['archive']}"
         log(line)
+
+
+def _backup_text(record):
+    """Size and expiry of a migration's backup, or why there is none."""
+    path = backups.backup_of(record)
+    if path and os.path.exists(path):
+        kind = "folder, zipped by prune" if os.path.isdir(path) else "zip"
+        return f"{backups.size_of(path) / 1e6:.0f} MB {kind}, until {backups.expiry(record)}"
+    return f"deleted {record['backup_pruned']}" if record.get("backup_pruned") else "none"
 
 
 def _report_problems(problems):
@@ -272,7 +316,11 @@ def _parser():
     s.add_argument("--status", required=True, choices=["ok", "partial", "failed"])
     s.add_argument("--note", help="one-line summary")
 
-    sub.add_parser("status", help="lists the migrations and the archives that can already be deleted")
+    sub.add_parser("status", help="lists the migrations, their backups and the archives that can already be deleted")
+
+    s = sub.add_parser("prune", help=f"deletes backups older than {backups.BACKUP_DAYS} days and zips older folder backups")
+    s.add_argument("--older-than", type=int, metavar="DAYS", help="also deletes backups at least this many days old")
+    s.add_argument("--dry-run", action="store_true", help="shows what it would do without changing anything")
     return p
 
 
@@ -284,4 +332,5 @@ COMMANDS = {
     "undo": cmd_undo,
     "phase2": cmd_phase2,
     "status": cmd_status,
+    "prune": cmd_prune,
 }

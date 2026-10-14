@@ -7,7 +7,8 @@ import json
 import re
 import sys
 
-CHANGING_COMMANDS = ("migrate", "undo", "archive", "relink")
+CHANGING_COMMANDS = ("migrate", "undo", "archive", "relink", "prune")
+PREVIEWABLE = ("migrate", "prune")  # with --dry-run they change nothing
 COMMAND_WORD = re.compile(r"(?<![\w\\/.-])(" + "|".join(CHANGING_COMMANDS) + r")(?![\w\\/.-])")
 REASON = "cc-move: this command moves folders or changes Claude Code's state, so it always needs your approval."
 
@@ -18,7 +19,7 @@ def needs_approval(command):
     words = COMMAND_WORD.findall(rest) if found else []
     if not words:
         return False
-    return not (words[0] == "migrate" and "--dry-run" in rest)
+    return not (words[0] in PREVIEWABLE and "--dry-run" in rest)
 
 
 def main():

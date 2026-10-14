@@ -97,11 +97,12 @@ def list_dir(p):
         return []
 
 
-def unique_path(path):
-    """`path`, or `path-2`, `path-3`... if it already exists (case-insensitive, like Windows)."""
-    candidate, i = path, 2
+def unique_path(path, suffix=""):
+    """`path + suffix`, or `path-2 + suffix`, `path-3 + suffix`... if it already exists (case-insensitive,
+    like Windows)."""
+    candidate, i = path + suffix, 2
     while os.path.exists(candidate):
-        candidate, i = f"{path}-{i}", i + 1
+        candidate, i = f"{path}-{i}{suffix}", i + 1
     return candidate
 
 

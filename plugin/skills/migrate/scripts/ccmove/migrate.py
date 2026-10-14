@@ -5,7 +5,7 @@ import datetime as dt
 import os
 import shutil
 
-from . import Abort, copying, editor_state, finalize, log, progress, project_info
+from . import Abort, backups, copying, editor_state, finalize, log, progress, project_info
 from .claude_state import count_transcripts, link_problems, relink
 from .paths import full, is_under, unique_path
 from .report import write_report
@@ -127,6 +127,8 @@ class Migration:
             log(f"Sessions: projects/{old} ({transcripts} transcripts) -> projects/{new}")
         if not self.moves:
             log("Sessions: no session folder to move (none, or they already have the new name).")
+        history = sum(copying.dir_stats(self.state.project_path(d))[1] for d in self.state.session_dirs(self.src))
+        log(f"Session history: {history / 1e6:.0f} MB to back up and rewrite")
 
     def _show_dependency_sizes(self):
         """Size of each dependency folder, to decide whether --with-deps is worth it."""
@@ -255,7 +257,8 @@ class Migration:
         """Backs up the Claude Code state and reassociates the sessions to the new path."""
         log("Backing up the Claude Code state...")
         moved = [old for old, _ in self.moves]
-        self.record["backup_dir"] = self.state.backup(moved, os.path.basename(self.src))
+        self.record["backup"] = backups.write_zip(self.state, moved, os.path.basename(self.src))
+        self.record["backup_expires"] = backups.expiry(self.record).isoformat()
         log("Reassociating the sessions...")
         self.details["relink"] = relink(self.state, self.src, self.dst)
         problems = link_problems(self.state, self.src, self.dst)

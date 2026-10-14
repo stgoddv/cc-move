@@ -7,14 +7,11 @@ Claude Code links sessions to the folder by its path, in three places:
 """
 
 import ctypes
-import datetime as dt
 import json
 import os
-import shutil
 
 from . import Abort
-from .paths import (full, is_under, list_dir, match_case, project_dir_name, same_path, to_windows, unique_path,
-                    write_text_atomic)
+from .paths import full, is_under, list_dir, match_case, project_dir_name, same_path, to_windows, write_text_atomic
 from .rewriter import PathRewriter, rewrite_dir
 
 # Above this length Claude Code truncates the name and adds an undocumented hash.
@@ -172,20 +169,6 @@ class ClaudeState:
             write_text_atomic(self.history, "".join(lines))
         return changed
 
-    # ------------------------------------------------------------------------ backup
-
-    def backup(self, dir_names, tag):
-        """Copies ~/.claude.json, the history and the given session folders. Returns the folder."""
-        dest = unique_path(os.path.join(self.backups, dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + tag))
-        os.makedirs(dest)
-        if os.path.isfile(self.config):
-            shutil.copy2(self.config, os.path.join(dest, "claude.json"))
-        if os.path.isfile(self.history):
-            shutil.copy2(self.history, os.path.join(dest, "history.jsonl"))
-        for name in dir_names:
-            shutil.copytree(self.project_path(name), os.path.join(dest, "projects", name))
-        return dest
-
 
 # ------------------------------------------------------------- reassociation and checks
 
@@ -217,17 +200,16 @@ def relink(state, src, dst):
     }
 
 
-def link_problems(state, src, dst):
-    """What is missing for everything to point to `dst` (empty list = reassociation complete)."""
+def link_problems(state, src, dst, mentions=True):
+    """What is missing for everything to point to `dst` (empty list = reassociation complete).
+    With mentions=False, only what Claude Code uses to find the sessions: folders, ~/.claude.json and history."""
     rewriter = PathRewriter(src, dst)
     problems = []
     leftover_dirs = [d for d in state.session_dirs(src) if d != moved_dir_name(d, src, dst)]
     if leftover_dirs:
         problems.append(f"session folders of the old path still exist: {leftover_dirs}")
-    for name in state.session_dirs(dst, also_under=(src,)):
-        n = rewrite_dir(state.project_path(name), rewriter, dry=True)["replacements"]
-        if n:
-            problems.append(f"{n} mentions of the old path in projects/{name}")
+    if mentions:
+        problems += transcript_mentions(state, src, dst)
     config_changes = state.rewrite_config(rewriter, dry=True)
     if config_changes:
         problems.append(f"~/.claude.json still has the old path ({len(config_changes)} pending changes)")
@@ -235,6 +217,21 @@ def link_problems(state, src, dst):
     if history_entries:
         problems.append(f"history.jsonl has {history_entries} entries with the old path")
     return problems
+
+
+def transcript_mentions(state, src, dst):
+    """Mentions of the old path in the session folders of `dst`, one line per folder.
+
+    Right after the rewrite there must be none. Later ones are usually conversation text (someone talking about the
+    old path), so `verify` reports them without rewriting them.
+    """
+    rewriter = PathRewriter(src, dst)
+    found = []
+    for name in state.session_dirs(dst, also_under=(src,)):
+        n = rewrite_dir(state.project_path(name), rewriter, dry=True)["replacements"]
+        if n:
+            found.append(f"{n} mentions of the old path in projects/{name}")
+    return found
 
 
 # ------------------------------------------------------------------------- helpers

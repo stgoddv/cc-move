@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stdout
 
 import _winapi
@@ -640,6 +641,25 @@ class MigrationTest(FixtureTestCase):
         self.assertEqual(f.run("verify", "--all"), 0, f.output)
         self.assertNotIn(forward(f.src), read_json(f.config)["projects"])
 
+    def test_verify_does_not_repair_while_a_session_is_open(self):
+        f = self.f
+        config = read_json(f.config)
+        config["projects"][forward(f.src)] = {"allowedTools": ["Z"]}
+        write(f.config, json.dumps(config, indent=2))
+        write(os.path.join(f.claude, "sessions", "1.json"), json.dumps({"pid": os.getpid(), "cwd": f.dst}))
+        self.assertEqual(f.run("verify", f.dst), 1, f.output)
+        self.assertIn("not repaired", f.output)
+        self.assertIn(forward(f.src), read_json(f.config)["projects"])  # left for when the session is closed
+
+    def test_verify_leaves_later_mentions_in_transcripts(self):
+        f = self.f  # someone talked about the old path after the migration: that is conversation text
+        transcript = os.path.join(f.projects, f.dst_dir_name, f.transcript_name)
+        with open(transcript, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "user", "cwd": f.dst, "text": f"it used to be in {f.src}"}) + "\n")
+        self.assertEqual(f.run("verify", f.dst), 0, f.output)
+        self.assertIn("left as it is", f.output)
+        self.assertIn(in_json(f.src), read(transcript))
+
     def test_undo_restores_original_and_sessions(self):
         f = self.f
         self.assertEqual(f.run("undo", f.dst), 0, f.output)
@@ -717,7 +737,9 @@ class ConfirmHookTest(unittest.TestCase):
                         r'python C:/p/cc_move.py migrate "C:\a" "C:\b" --with-deps',
                         r'python C:/p/cc_move.py --state-dir "C:\s" undo "C:\b"',
                         r'cd C:\x && py -3 C:\p\cc_move.py archive "C:\b"',
-                        r'python C:/p/cc_move.py relink "C:\a" "C:\b"'):
+                        r'python C:/p/cc_move.py relink "C:\a" "C:\b"',
+                        r'python C:/p/cc_move.py prune',
+                        r'python C:/p/cc_move.py prune --older-than 0'):
             self.assertTrue(self.needs_approval(command), command)
 
     def test_read_only_commands_do_not(self):
@@ -725,8 +747,44 @@ class ConfirmHookTest(unittest.TestCase):
                         r'python C:/p/cc_move.py migrate "C:\a" "C:\b" --dry-run',
                         r'python C:/p/cc_move.py verify "C:\x\archive-2026-10-14-demo"',
                         r'python C:/p/cc_move.py status',
+                        r'python C:/p/cc_move.py prune --dry-run',
                         r'git mv migrate undo'):
             self.assertFalse(self.needs_approval(command), command)
+
+
+class GuardHookTest(unittest.TestCase):
+    """The skill's hook blocks commits, pushes and deploys, and nothing else (not even commands with $VARIABLES)."""
+
+    SCRIPT = os.path.join(REPO, "plugin", "hooks", "guard_migration.py")
+
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(self.SCRIPT))
+        import guard_migration
+        self.blocked_reason = guard_migration.blocked_reason
+
+    def test_blocks_commits_pushes_and_deploys(self):
+        for command in ('git commit -m "x"', "cd C:/x && git push origin main", r'git -C "C:\a b" push',
+                        "git -c user.name=x commit -m y", "GIT_DIR=x git commit", "& git push",
+                        "echo ok; terraform apply", "npm publish", "vercel --prod", "firebase deploy",
+                        "sls deploy", "echo $(git push)"):
+            self.assertIsNotNone(self.blocked_reason(command), command)
+
+    def test_allows_everything_else(self):
+        for command in ('du -sh "$LOCALAPPDATA/cc-move"', 'echo "$HOME"', "git status", "git log --oneline -5",
+                        'grep -n "git push" README.md', "echo git commit", "python cc_move.py verify --all",
+                        "git diff && git status"):
+            self.assertIsNone(self.blocked_reason(command), command)
+
+    def run_hook(self, command):
+        """Runs the hook script as Claude Code does: the tool call as JSON on stdin."""
+        return subprocess.run([sys.executable, self.SCRIPT], input=json.dumps({"tool_input": {"command": command}}),
+                              capture_output=True, text=True)
+
+    def test_exit_code_and_message(self):
+        blocked = self.run_hook("git push")
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn("Blocked by cc-move", blocked.stderr)
+        self.assertEqual(self.run_hook('du -sh "$LOCALAPPDATA"').returncode, 0)
 
 
 class PathsTest(unittest.TestCase):
@@ -787,6 +845,100 @@ class WithDepsTest(FixtureTestCase):
         manifest = read(os.path.join(record["report_dir"], "manifest-src.tsv"))
         self.assertIn("F\tnode_modules/x/index.js", manifest)
         self.assertIn("copied as they were", read(os.path.join(f.dst, "CLAUDE.local.md")))
+
+
+class BackupTest(FixtureTestCase):
+    """Each migration leaves a zip of Claude Code's state that expires in 30 days; prune and migrate clean up."""
+
+    def legacy_backup(self, name, date):
+        """A folder backup and its registry record, as cc-move 0.2 left them."""
+        folder = os.path.join(self.f.claude, "backups", "cc-move", name)
+        write(os.path.join(folder, "claude.json"), "{}")
+        write(os.path.join(folder, "projects", "c--x", "s.jsonl"), "{}\n" * 1000)
+        record = {"id": name, "date": date.isoformat(), "src": r"C:\x", "dst": r"C:\y", "archive": None,
+                  "phase1": "ok", "phase2": "ok", "backup_dir": folder}
+        Registry(self.f.state_dir).save(record)
+        return folder
+
+    def expire(self, record_id):
+        """Moves the expiry of a migration's backup to yesterday."""
+        registry = Registry(self.f.state_dir)
+        record = next(r for r in registry.all() if r["id"] == record_id)
+        record["backup_expires"] = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        registry.save(record)
+
+    def test_migration_leaves_a_zip_that_expires_in_30_days(self):
+        f = self.f
+        self.assertEqual(f.run("migrate", f.src, f.dst), 0, f.output)
+        record = f.record()
+        self.assertTrue(record["backup"].endswith(".zip") and os.path.isfile(record["backup"]), record)
+        self.assertNotIn("backup_dir", record)
+        self.assertEqual(record["backup_expires"], (dt.date.today() + dt.timedelta(days=30)).isoformat())
+        with zipfile.ZipFile(record["backup"]) as z:
+            names = set(z.namelist())
+            self.assertIn(forward(f.src), json.loads(z.read("claude.json"))["projects"])  # the state before
+        self.assertTrue({"claude.json", "history.jsonl", f"projects/{f.src_dir_name}/{f.transcript_name}",
+                         f"projects/{f.src_dir_name}-sub/s.jsonl"} <= names, names)
+
+    def test_prune_deletes_expired_backups_and_dry_run_does_not(self):
+        f = self.f
+        self.assertEqual(f.run("migrate", f.src, f.dst), 0, f.output)
+        backup = f.record()["backup"]
+        self.expire(f.record()["id"])
+        self.assertEqual(f.run("prune", "--dry-run"), 0, f.output)
+        self.assertIn("would delete", f.output)
+        self.assertTrue(os.path.isfile(backup))
+        self.assertEqual(f.run("prune"), 0, f.output)
+        self.assertFalse(os.path.exists(backup))
+        self.assertEqual((f.record()["backup"], f.record()["backup_pruned"]), (None, dt.date.today().isoformat()))
+        self.assertEqual(f.run("status"), 0, f.output)
+        self.assertIn("backup=deleted", f.output)
+
+    def test_older_than_deletes_recent_backups_too(self):
+        f = self.f
+        self.assertEqual(f.run("migrate", f.src, f.dst), 0, f.output)
+        backup = f.record()["backup"]
+        self.assertEqual(f.run("prune"), 0, f.output)
+        self.assertIn("Nothing to prune", f.output)
+        self.assertTrue(os.path.isfile(backup))
+        self.assertEqual(f.run("prune", "--older-than", "0"), 0, f.output)
+        self.assertFalse(os.path.exists(backup))
+
+    def test_pruning_keeps_the_registry_in_order(self):
+        f = self.f  # verify follows later migrations in registry order
+        self.legacy_backup("20260801-100000-old", dt.date.today() - dt.timedelta(days=40))
+        self.assertEqual(f.run("migrate", f.src, f.dst), 0, f.output)
+        self.assertEqual([r["id"] for r in Registry(f.state_dir).all()][0], "20260801-100000-old")
+
+    def test_folder_backups_of_older_versions_are_zipped_or_deleted(self):
+        f = self.f
+        recent = self.legacy_backup("20261014-111935-recent", dt.date.today())
+        old = self.legacy_backup("20260801-100000-old", dt.date.today() - dt.timedelta(days=40))
+        stranger = os.path.join(f.claude, "backups", "cc-move", "copied-by-hand")
+        write(os.path.join(stranger, "x.txt"), "x")
+        self.assertEqual(f.run("prune"), 0, f.output)
+        self.assertFalse(os.path.exists(recent) or os.path.exists(old))
+        records = {r["id"]: r for r in Registry(f.state_dir).all()}
+        zipped = records["20261014-111935-recent"]
+        self.assertEqual(zipped["backup"], recent + ".zip")
+        self.assertNotIn("backup_dir", zipped)
+        self.assertEqual(zipped["backup_expires"], (dt.date.today() + dt.timedelta(days=30)).isoformat())
+        with zipfile.ZipFile(zipped["backup"]) as z:
+            self.assertEqual(sorted(z.namelist()), ["claude.json", "projects/c--x/s.jsonl"])
+        self.assertIsNone(records["20260801-100000-old"]["backup"])
+        self.assertTrue(os.path.isdir(stranger))  # unknown to cc-move: listed, never deleted
+        self.assertIn("copied-by-hand", f.output)
+
+    def test_migrate_prunes_expired_backups(self):
+        f = self.f
+        old = self.legacy_backup("20260801-100000-old", dt.date.today() - dt.timedelta(days=40))
+        self.assertEqual(f.run("migrate", "--dry-run", f.src, f.dst), 0, f.output)
+        self.assertIn("would delete", f.output)
+        self.assertTrue(os.path.isdir(old))
+        self.assertEqual(f.run("migrate", f.src, f.dst), 0, f.output)
+        self.assertIn("Backups of earlier migrations", f.output)
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.isfile(f.record()["backup"]))  # the new one stays
 
 
 class NoteTest(unittest.TestCase):

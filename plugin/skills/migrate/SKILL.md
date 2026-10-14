@@ -5,32 +5,10 @@ argument-hint: "<source> <destination> [--with-deps]"
 allowed-tools: Bash(python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py migrate --dry-run *) Bash(python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py verify *) Bash(python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py status)
 hooks:
   PreToolUse:
-    - matcher: "Bash"
+    - matcher: "Bash|PowerShell"
       hooks:
         - type: command
-          if: "Bash(git commit *)"
-          command: "python -c \"import sys; sys.stderr.write('Blocked by cc-move: no commits after a migration in this session. Open a new session to commit.'); sys.exit(2)\""
-        - type: command
-          if: "Bash(git push *)"
-          command: "python -c \"import sys; sys.stderr.write('Blocked by cc-move: no pushes after a migration in this session. Open a new session to push.'); sys.exit(2)\""
-        - type: command
-          if: "Bash(npm publish *)"
-          command: "python -c \"import sys; sys.stderr.write('Blocked by cc-move: no publishing during a migration.'); sys.exit(2)\""
-        - type: command
-          if: "Bash(terraform apply *)"
-          command: "python -c \"import sys; sys.stderr.write('Blocked by cc-move: no deploys during a migration.'); sys.exit(2)\""
-        - type: command
-          if: "Bash(cdk deploy *)"
-          command: "python -c \"import sys; sys.stderr.write('Blocked by cc-move: no deploys during a migration.'); sys.exit(2)\""
-        - type: command
-          if: "Bash(serverless deploy *)"
-          command: "python -c \"import sys; sys.stderr.write('Blocked by cc-move: no deploys during a migration.'); sys.exit(2)\""
-        - type: command
-          if: "Bash(vercel *)"
-          command: "python -c \"import sys; sys.stderr.write('Blocked by cc-move: no deploys during a migration.'); sys.exit(2)\""
-        - type: command
-          if: "Bash(firebase deploy *)"
-          command: "python -c \"import sys; sys.stderr.write('Blocked by cc-move: no deploys during a migration.'); sys.exit(2)\""
+          command: "python \"${CLAUDE_PLUGIN_ROOT}/hooks/guard_migration.py\""
 ---
 
 # Move a project without losing its Claude Code sessions
@@ -81,7 +59,7 @@ The migration has two phases:
 
    - The script prints at most one progress line per minute and keeps the latest one in `progress.txt` (its path
      is printed at the start). Small projects finish before the first line.
-   - If the dry run showed more than ~2 GB, run it **in the background** and wait for the completion notice,
+   - If the dry run showed more than ~2 GB, or a `Session history` over ~200 MB, run it **in the background** and wait for the completion notice,
      **without polling** (every check costs tokens). If the user asks how it is going, read only `progress.txt`.
 3. If it ends with `ERROR`, **do not improvise**: do not delete, do not copy by hand, do not retry with other
    options. Report the output. If verification failed, the report folder has `manifest-diff.txt`. Claude Code's
@@ -173,3 +151,6 @@ Tell the user to:
 - `relink "<source>" "<destination>"`: re-applies only the session reassociation (idempotent).
 - `undo "<destination>"`: moves the original and the sessions back to the old path. **Only if the user asks.** It
   does not delete the copy. For a case-only rename it renames the folder back.
+- `prune [--older-than DAYS] [--dry-run]`: each migration zips Claude Code's state in `~/.claude/backups/cc-move`
+  and keeps it 30 days; `migrate` deletes expired ones by itself. `prune` deletes them earlier and zips backup
+  folders of older versions. **Only if the user asks**; run `--dry-run` first and show what it would delete.

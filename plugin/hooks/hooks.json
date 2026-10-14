@@ -1,5 +1,5 @@
 {
-  "description": "Always ask the user before a cc-move command that changes something (migrate, undo, archive, relink), in every permission mode",
+  "description": "Always ask the user before a cc-move command that changes something (migrate, undo, archive, relink, prune), in every permission mode",
   "hooks": {
     "PreToolUse": [
       {

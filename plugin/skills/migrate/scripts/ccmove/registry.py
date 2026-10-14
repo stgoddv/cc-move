@@ -21,8 +21,13 @@ class Registry:
             return [json.loads(line) for line in f if line.strip()]
 
     def save(self, record):
-        """Adds or replaces (by `id`) a migration."""
-        records = [r for r in self.all() if r["id"] != record["id"]] + [record]
+        """Adds a migration at the end, or replaces it in place (by `id`): the order is chronological."""
+        records = self.all()
+        ids = [r["id"] for r in records]
+        if record["id"] in ids:
+            records[ids.index(record["id"])] = record
+        else:
+            records.append(record)
         write_text_atomic(self.path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
 
     def find(self, path):
