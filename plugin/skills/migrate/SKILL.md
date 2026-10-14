@@ -109,8 +109,9 @@ Append the findings to the "Phase 2" section of `report.md`.
   `.venv\Scripts\python -m pip install -r <freeze file>` (or the project's own requirements if they match).
 - Reinstall Node dependencies **from the lockfile**: `pnpm install --frozen-lockfile`, `npm ci`,
   `yarn install --frozen-lockfile`.
-- Fix old absolute paths in **local configuration** (`.claude/settings.local.json`, `.env*`, `.vscode/`…). Leave
-  documentation and history files alone, and tell the user which ones mention the old path.
+- Fix old absolute paths in **local configuration** (`.claude/settings.local.json`, `.env*`, `.vscode/`…) with the
+  Edit tool, not `sed` (backslashes in Windows paths break its patterns). Leave documentation and history files
+  alone, and tell the user which ones mention the old path.
 - Offline checks: typecheck, lint, build.
 - If a reinstall fails (package removed from the registry, native build, CUDA), copy that folder from the archived
   original with `robocopy` and note it.
