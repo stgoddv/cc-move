@@ -393,6 +393,7 @@ class MigrationTest(FixtureTestCase):
         note = read(os.path.join(f.dst, "CLAUDE.local.md"))
         self.assertIn(finalize.NOTE_START, note)
         self.assertIn(self.archive, note)
+        self.assertIn("`node_modules`, `packages/p/node_modules`", note)
         self.assertIn("CLAUDE.local.md", read(os.path.join(f.dst, ".git", "info", "exclude")))
         status = subprocess.run(["git", "-C", f.dst, "status", "--porcelain"], capture_output=True, text=True)
         self.assertNotIn("CLAUDE.local.md", status.stdout)
@@ -576,6 +577,27 @@ class WithDepsTest(FixtureTestCase):
         manifest = read(os.path.join(record["report_dir"], "manifest-src.tsv"))
         self.assertIn("F\tnode_modules/x/index.js", manifest)
         self.assertIn("copied as they were", read(os.path.join(f.dst, "CLAUDE.local.md")))
+
+
+class NoteTest(unittest.TestCase):
+    """The CLAUDE.local.md note mentions dependency folders only if the scan found some."""
+
+    RECORD = {"src": r"C:\a\Proj", "date": "2026-10-14", "delete_after": "2027-04-14", "archive": r"C:\a\x"}
+
+    def test_no_dependency_folders_means_no_line(self):
+        note = finalize.note_text(dict(self.RECORD, dep_dirs=[]))
+        self.assertNotIn("node_modules", note)
+        self.assertNotIn("not copied", note)
+
+    def test_dependency_folders_are_listed(self):
+        note = finalize.note_text(dict(self.RECORD, dep_dirs=["node_modules", ".venv"]))
+        self.assertIn("(`node_modules`, `.venv`) were not copied", note)
+        note = finalize.note_text(dict(self.RECORD, dep_dirs=["node_modules"], with_deps=True))
+        self.assertIn("(`node_modules`) were copied as they were", note)
+
+    def test_records_of_older_versions_keep_the_generic_line(self):
+        self.assertIn("`node_modules` and the Python virtual environments were not copied",
+                      finalize.note_text(self.RECORD))
 
 
 if __name__ == "__main__":

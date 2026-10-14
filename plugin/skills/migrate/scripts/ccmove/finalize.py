@@ -42,15 +42,12 @@ def archive_original(src, date, attempts=5, wait=2):
 def note_text(record):
     """Section of CLAUDE.local.md that explains the migration to a future agent."""
     archive = record.get("archive") or archive_path(record["src"], record["date"])
-    if record.get("with_deps"):
-        deps = "`node_modules` and the virtual environments were copied as they were; they were reviewed afterwards (below)."
-    else:
-        deps = "`node_modules` and the Python virtual environments were not copied: they were recreated afterwards (below)."
+    deps = _deps_line(record)
     return "\n".join([
         NOTE_START,
         f"## Folder migration ({record['date']})",
         f"This project was moved from `{record['src']}` with cc-move. The copy was verified by hash.",
-        deps,
+        *([deps] if deps else []),
         f"The original was left intact in `{archive}` until {record['delete_after']}.",
         "If an error appears that did not happen before (missing dependency, nonexistent path, broken link),",
         "suspect the migration first and compare with the archived original.",
@@ -59,6 +56,21 @@ def note_text(record):
         "Delete this section together with the archived folder.",
         NOTE_END,
     ])
+
+
+def _deps_line(record):
+    """Line of the note about dependency folders; None if the scan found none."""
+    dirs = record.get("dep_dirs")
+    if dirs is None:  # registered by cc-move 0.1.x, which did not record them
+        listed = "`node_modules` and the Python virtual environments"
+    elif not dirs:
+        return None
+    else:
+        more = f" and {len(dirs) - 5} more" if len(dirs) > 5 else ""
+        listed = "The dependency folders (" + ", ".join(f"`{d}`" for d in dirs[:5]) + more + ")"
+    if record.get("with_deps"):
+        return f"{listed} were copied as they were; they were reviewed afterwards (below)."
+    return f"{listed} were not copied: they were recreated afterwards (below)."
 
 
 def write_note(project, record):

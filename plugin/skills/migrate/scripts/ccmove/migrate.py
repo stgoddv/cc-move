@@ -160,6 +160,7 @@ class Migration:
             "archive": None,
             "delete_after": _add_months(self.today, ARCHIVE_MONTHS).isoformat(),
             "with_deps": self.with_deps,
+            "dep_dirs": [rel for rel, _ in self.tree.deps],
             "phase1": "in progress",
             "phase2": "pending",
             "report_dir": self.report_dir,
