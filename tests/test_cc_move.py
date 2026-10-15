@@ -729,6 +729,57 @@ class BuildOutputsTest(FixtureTestCase):
         self.assertIn("1 more inside build outputs", read(os.path.join(f.dst, "CLAUDE.local.md")))
 
 
+class ChainTest(FixtureTestCase):
+    """A project moved twice: src -> mid (by mistake), then mid -> dst."""
+
+    PHASE2 = "- Recreated: `.venv` with uv sync\n- Pending / unresolved: run sam build"
+
+    def setUp(self):
+        super().setUp()
+        f = self.f
+        today = dt.date.today().isoformat()
+        self.mid = os.path.join(self.tmp, "Desktop", "Proj")
+        self.first_archive = os.path.join(os.path.dirname(f.src), f"archive-{today}-Proj")
+        self.mid_archive = os.path.join(self.tmp, "Desktop", f"archive-{today}-Proj")
+        self.assertEqual(f.run("migrate", f.src, self.mid), 0, f.output)
+        self.first = f.record()
+        note = os.path.join(self.mid, "CLAUDE.local.md")
+        write(note, read(note).replace("- Recreated: (pending, phase 2)\n- Pending / unresolved: (pending, phase 2)",
+                                       self.PHASE2))
+        self.assertEqual(f.run("migrate", self.mid, f.dst), 0, f.output)
+        self.note = os.path.join(f.dst, "CLAUDE.local.md")
+
+    def test_note_keeps_the_true_origin_and_the_earlier_note(self):
+        note = read(self.note)
+        self.assertEqual(note.count(finalize.NOTE_START), 1)
+        self.assertIn(f"moved from `{self.f.src}` with cc-move, through `{self.mid}`", note)
+        self.assertIn(f"The original was left intact in `{self.first_archive}`", note)
+        self.assertIn(f"The intermediate copy `{self.mid}` was archived in `{self.mid_archive}`", note)
+        self.assertIn("### Earlier move\n### Folder migration", note)
+        self.assertIn(self.PHASE2, note)
+        self.assertEqual(self.f.record()["previous"], self.first["id"])
+
+    def test_archive_updates_the_intermediate_line_only(self):
+        f = self.f
+        os.rename(self.mid_archive, self.mid)  # as if renaming the intermediate copy had failed
+        record = f.record()
+        record.update(archive=None, phase1="ok (archive pending)")
+        Registry(f.state_dir).save(record)
+        self.assertEqual(f.run("archive", f.dst), 0, f.output)
+        note = read(self.note)
+        self.assertIn(f"The original was left intact in `{self.first_archive}`", note)
+        self.assertIn(f"The intermediate copy `{self.mid}` was archived in `{self.mid_archive}`", note)
+
+    def test_deleted_intermediate_copy_is_not_a_problem(self):
+        f = self.f
+        os.rename(self.mid_archive, os.path.join(self.tmp, "deleted"))  # as good as deleted for cc-move
+        self.assertEqual(f.run("status"), 0, f.output)
+        self.assertIn("archived=deleted copy", f.output)
+        self.assertIn(f"-> moved on: {f.record()['id']}", f.output)
+        self.assertEqual(f.run("verify", "--all"), 0, f.output)
+        self.assertIn("intermediate copy was deleted", f.output)
+
+
 class PendingLinksTest(FixtureTestCase):
     """A link to a dependency folder that is not copied (a monorepo's apps/m/node_modules -> root node_modules)."""
 

@@ -159,7 +159,9 @@ Tell the user to:
 ## Other commands
 
 - `status`: lists migrations and flags archives older than 6 months, which the user may then delete together with
-  the `cc-move` section of `CLAUDE.local.md`.
+  the `cc-move` section of `CLAUDE.local.md`. A project moved again shows `-> moved on`; the archive of an
+  intermediate copy (moved A → B, then B → C) may be deleted at once and shows as `deleted copy`: the true original
+  is A's archive.
 - `relink "<source>" "<destination>"`: re-applies only the session reassociation (idempotent).
 - `recreate-links "<destination>"`: creates the links phase 1 left pending once their targets exist (idempotent).
 - `undo "<destination>"`: moves the original and the sessions back to the old path. **Only if the user asks.** It

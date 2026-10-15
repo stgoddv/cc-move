@@ -187,11 +187,13 @@ class Migration:
         name = os.path.basename(self.src)
         self.report_dir = unique_path(os.path.join(self.state_dir, "reports", f"{self.date}-{name}"))
         os.makedirs(self.report_dir)
+        self.chain = self.registry.chain({"src": self.src})  # earlier moves that led here, e.g. A -> B before B -> C
         self.record = {
             "id": os.path.basename(self.report_dir),
             "date": self.date,
             "src": self.src,
             "dst": self.dst,
+            "previous": self.chain[-1]["id"] if self.chain else None,
             **self._record_fields(),
             "phase1": "in progress",
             "report_dir": self.report_dir,
@@ -312,7 +314,7 @@ class Migration:
         """Looks for old paths in the project, writes the note in CLAUDE.local.md and hides it from git."""
         # Before writing the note, which mentions the old path on purpose.
         self.details["stale_refs"] = project_info.stale_refs(self.dst, self.rewriter)
-        finalize.write_note(self.dst, self.record)
+        finalize.write_note(self.dst, self.record, self.chain)
         self.details["git_exclude"] = finalize.ignore_note_in_git(self.dst)
         warning = finalize.agents_md_warning(self.dst)
         if warning:

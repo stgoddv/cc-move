@@ -16,7 +16,7 @@ from .migrate import Migration
 from .paths import disk_case, full, is_under, long_path, same_path
 from .rename import CaseRename, is_case_rename
 from .progress import DEFAULT_INTERVAL
-from .registry import Registry
+from .registry import Registry, source_is_copy
 
 SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cc_move.py")
 
@@ -102,7 +102,7 @@ def cmd_verify(args, state, registry):
     for record in records:
         if args.all:
             log(f"\n== {record['id']}")
-        failures += _verify(state, record, _final_destination(registry, record))
+        failures += _verify(state, record, _final_destination(registry, record), source_is_copy(registry.chain(record)))
     return 1 if failures else 0
 
 
@@ -112,17 +112,17 @@ def _final_destination(registry, record):
     Verifying against the record's own destination would revert them: after Proj -> proj -> Proj, the first
     rename would turn every 'Proj' back into 'proj'.
     """
-    records = registry.all()
-    dst = record["dst"]
-    for later in records[[r["id"] for r in records].index(record["id"]) + 1:]:
-        if later["phase1"].startswith("ok") and same_path(later["src"], dst):
-            dst = later["dst"]
-    return dst
+    while True:
+        later = registry.next_move(record)
+        if not later:
+            return record["dst"]
+        record = later
 
 
-def _verify(state, record, dst):
+def _verify(state, record, dst, from_copy=False):
     """Verifies a migration against the project's current path `dst`. Open Claude sessions can undo the change
     in ~/.claude.json when they close, so if it finds the old path it reassociates again.
+    `from_copy`: the source was made by an earlier migration, so its archive is a copy that may be deleted.
 
     It repairs only what Claude Code uses to find the sessions (folders, ~/.claude.json, history), and only when no
     session is open in the project: rewriting a transcript that a session is writing could lose its last lines.
@@ -154,7 +154,12 @@ def _verify(state, record, dst):
     if not _is_case_rename(record):  # a rename has no archive; its name on disk was checked above
         if not record.get("archive"):
             problems.append("the original has not been archived yet (use the archive command)")
-        elif not os.path.isdir(record["archive"]):
+        elif os.path.isdir(record["archive"]):
+            pass
+        elif from_copy:
+            log(f"Note: the archived intermediate copy was deleted ({record['archive']}); "
+                "the true original is archived by an earlier migration.")
+        else:
             problems.append(f"the archived folder does not exist: {record['archive']}")
     return _report_problems(problems)
 
@@ -190,7 +195,7 @@ def cmd_archive(args, state, registry):
         record["phase1"] = "ok"
     registry.save(record)
     if os.path.isdir(record["dst"]):
-        update_note_archive(record["dst"], record)  # the note mentions the final name of the archive
+        update_note_archive(record["dst"], record, registry.chain(record))  # it names the archive's final path
     log(f"Archived: {target}")
 
 
@@ -319,9 +324,19 @@ def cmd_status(args, state, registry):
         log("There are no registered migrations.")
     for r in records:
         archived = bool(r.get("archive")) and os.path.isdir(r["archive"])
-        archive_text = "n/a (rename)" if _is_case_rename(r) else "yes" if archived else "no"
+        if _is_case_rename(r):
+            archive_text = "n/a (rename)"
+        elif archived:
+            archive_text = "yes"
+        elif r.get("archive") and source_is_copy(registry.chain(r)):
+            archive_text = "deleted copy"  # the archive of an intermediate copy: the true original is further back
+        else:
+            archive_text = "no"
         line = (f"{r['date']}  {os.path.basename(r['src']):24} phase1={r['phase1']:10} "
                 f"phase2={r['phase2']:8} archived={archive_text:12} backup={_backup_text(r)}")
+        later = registry.next_move(r)
+        if later:
+            line += f"  -> moved on: {later['id']}"
         if archived and r.get("delete_after") and today >= r["delete_after"]:
             line += f"  ** can be deleted from {r['delete_after']}: {r['archive']}"
         log(line)

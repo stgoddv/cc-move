@@ -7,12 +7,15 @@ import subprocess
 import time
 
 from .paths import full, list_dir
+from .registry import source_is_copy
 
 NOTE_START = "<!-- cc-move:start -->"
 NOTE_END = "<!-- cc-move:end -->"
 NOTE_FILE = "CLAUDE.local.md"
 ARCHIVE_LINE = "The original was left intact in `{archive}` until {delete_after}."
 ARCHIVE_IN_NOTE = re.compile(r"(The original was left intact in `)[^`]*(`)")
+INTERMEDIATE_LINE = ("The intermediate copy `{src}` was archived in `{archive}`: it is only a copy, "
+                     "the true original is the one above.")
 
 
 def archive_path(src, date):
@@ -62,23 +65,43 @@ def rename_folder(src, target, attempts=5, wait=2):
     return str(error)
 
 
-def note_text(record):
-    """Section of CLAUDE.local.md that explains the migration to a future agent."""
+def note_text(record, chain=(), earlier_note=None):
+    """Section of CLAUDE.local.md that explains the migration to a future agent.
+
+    `chain` holds the earlier migrations that led to the source (Registry.chain): the note then names the first
+    source and the true original, and says that this migration's archive is only an intermediate copy.
+    `earlier_note` is the body of the section the copy already had, kept below so nothing written there is lost.
+    """
     archive = record.get("archive") or archive_path(record["src"], record["date"])
     deps = _deps_line(record)
     return "\n".join([
         NOTE_START,
         f"## Folder migration ({record['date']})",
-        f"This project was moved from `{record['src']}` with cc-move. The copy was verified by hash.",
+        *_origin_lines(record, list(chain), archive),
         *([deps] if deps else []),
-        ARCHIVE_LINE.format(archive=archive, delete_after=record["delete_after"]),
         "If an error appears that did not happen before (missing dependency, nonexistent path, broken link),",
         "suspect the migration first and compare with the archived original.",
         "- Recreated: (pending, phase 2)",
         "- Pending / unresolved: (pending, phase 2)",
         "Delete this section together with the archived folder.",
+        *(["", "### Earlier move", earlier_note] if earlier_note else []),
         NOTE_END,
     ])
+
+
+def _origin_lines(record, chain, archive):
+    """Where the project comes from and where the original is: this migration's, or the first copy's in a chain."""
+    if not source_is_copy(chain):
+        return [f"This project was moved from `{(chain or [record])[0]['src']}` with cc-move. "
+                "The copy was verified by hash.",
+                ARCHIVE_LINE.format(archive=archive, delete_after=record["delete_after"])]
+    first_copy = next(r for r in chain if r.get("kind") != "case-rename")
+    through = ", ".join(f"`{r['dst']}`" for r in chain)
+    return [f"This project was moved from `{chain[0]['src']}` with cc-move, through {through}. "
+            "Each copy was verified by hash.",
+            ARCHIVE_LINE.format(archive=first_copy.get("archive") or "(not archived)",
+                                delete_after=first_copy["delete_after"]),
+            INTERMEDIATE_LINE.format(src=record["src"], archive=archive)]
 
 
 def _deps_line(record):
@@ -98,30 +121,39 @@ def _deps_line(record):
     return f"{listed} were not copied: they were recreated afterwards (below){in_builds}."
 
 
-def write_note(project, record):
-    """Writes the note; if CLAUDE.local.md already exists, appends the section at the end or replaces it."""
+def write_note(project, record, chain=()):
+    """Writes the note; if CLAUDE.local.md already exists, appends the section at the end or replaces it.
+    A section already there belongs to an earlier move (the copy brought it along): it is kept inside the new one."""
     content = _read_note_file(project)
-    section = note_text(record)
     if content is None:
-        content = section + "\n"
+        content = note_text(record, chain) + "\n"
     elif _section_bounds(content):
         start, end = _section_bounds(content)
-        content = content[:start] + section + content[end:]
+        earlier = _demoted(content[start + len(NOTE_START):end - len(NOTE_END)].strip("\n"))
+        content = content[:start] + note_text(record, chain, earlier) + content[end:]
     else:
-        content = content.rstrip("\n") + "\n\n" + section + "\n"
+        content = content.rstrip("\n") + "\n\n" + note_text(record, chain) + "\n"
     _write_note_file(project, content)
 
 
-def update_note_archive(project, record):
+def update_note_archive(project, record, chain=()):
     """Puts the archive's final path in the note, keeping the rest of the section (phase 2 may have filled it in).
     Writes the whole note if there is no section to update."""
     content = _read_note_file(project)
     bounds = content and _section_bounds(content)
-    if not bounds or not ARCHIVE_IN_NOTE.search(content, *bounds):
-        return write_note(project, record)
+    intermediate = re.compile("(" + re.escape(INTERMEDIATE_LINE.split("{archive}")[0].format(src=record["src"]))
+                              + ")[^`]*(`)")
+    pattern = next((p for p in (intermediate, ARCHIVE_IN_NOTE) if bounds and p.search(content, *bounds)), None)
+    if not pattern:
+        return write_note(project, record, chain)
     start, end = bounds
-    section = ARCHIVE_IN_NOTE.sub(lambda m: m.group(1) + record["archive"] + m.group(2), content[start:end], count=1)
+    section = pattern.sub(lambda m: m.group(1) + record["archive"] + m.group(2), content[start:end], count=1)
     _write_note_file(project, content[:start] + section + content[end:])
+
+
+def _demoted(text):
+    """Markdown with every heading one level lower, to nest an earlier note inside the new one."""
+    return re.sub(r"^#", "##", text, flags=re.MULTILINE)
 
 
 def _section_bounds(content):
