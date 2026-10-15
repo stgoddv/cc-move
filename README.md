@@ -3,8 +3,8 @@
 [![tests](https://github.com/stgoddv/cc-move/actions/workflows/test.yml/badge.svg)](https://github.com/stgoddv/cc-move/actions/workflows/test.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A [Claude Code](https://claude.com/claude-code) plugin that moves a project folder to a new path **without losing
-its Claude Code sessions**. Windows only.
+A [Claude Code](https://claude.com/claude-code) plugin that moves or renames a project folder **without losing its
+Claude Code sessions**. Windows only.
 
 ## Why
 
@@ -12,7 +12,7 @@ Claude Code ties every session to the folder's path. If you move or rename a pro
 list in the new location is empty, the per-project settings are gone and the VS Code extension forgets which Claude
 tabs you had open. Your conversations are still on disk, just no longer linked to the folder.
 
-cc-move moves the folder and brings all of that along:
+cc-move moves or renames the folder and brings all of that along:
 
 - the folder itself, copied with robocopy and **verified file by file with SHA-256** before anything else changes;
 - the session transcripts, subagents, tool results and memory in `~/.claude/projects/`, with every mention of the
@@ -51,7 +51,7 @@ claude plugin install cc-move@cc-move
 
 Restart Claude Code (or open a new session). Type `/cc-move` and the `/cc-move:migrate` command should appear.
 
-## Move a project
+## Move or rename a project
 
 Say you want to move `C:\Users\me\OneDrive\Desktop\my-app` to `C:\Users\me\code\my-app`.
 
@@ -70,7 +70,8 @@ Say you want to move `C:\Users\me\OneDrive\Desktop\my-app` to `C:\Users\me\code\
    C:\Users\me\code\my-app"*.
 
    The destination can have a different name: move and rename at once (`...\Desktop\MyApp` → `...\code\my-app`), or
-   keep the same parent folder to only rename. To change only the letter case, see
+   keep the same parent folder to only rename (`...\code\MyApp` → `...\code\my-app`). A rename works like any move:
+   the folder is copied and verified, and the original is archived. To change only the letter case, see
    [Change the case of a folder name](#change-the-case-of-a-folder-name).
 
 4. **Review the dry run.** Claude first shows what would change (files, sessions, settings, open tabs) without

@@ -1,7 +1,7 @@
 {
   "name": "cc-move",
   "version": "0.3.0",
-  "description": "Move a project folder to a new path and bring its Claude Code sessions, settings and VS Code tabs along. Windows only.",
+  "description": "Move or rename a project folder and bring its Claude Code sessions, settings and VS Code tabs along. Windows only.",
   "author": {
     "name": "stgoddv",
     "url": "https://github.com/stgoddv"
