@@ -65,7 +65,9 @@ The migration has two phases:
    options. Report the output. If verification failed, the report folder has `manifest-diff.txt`. Claude Code's
    state is not touched until the copy is verified.
 4. If the original could not be renamed (folder in use), ask the user to close whatever uses it and run
-   `python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py archive "<destination>"`.
+   `python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py archive "<destination>"`. It keeps what phase 2 wrote in the note.
+   If the user already renamed the original by hand to `archive-<date>-<name>`, the same command finds it; if they
+   gave it another name or moved it, add `--path "<that folder>"`.
 
 The report is in `%LOCALAPPDATA%\cc-move\reports\<date>-<name>\`: `report.md` (readable summary, start of phase 2),
 `report.json`, the manifests, `robocopy.log`, `progress.txt` and `venvs\*.freeze.txt` (packages of each virtual

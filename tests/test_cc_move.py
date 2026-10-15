@@ -695,6 +695,60 @@ class MigrationTest(FixtureTestCase):
         self.assertEqual(f.record()["phase1"], "undone")
 
 
+class ArchiveTest(FixtureTestCase):
+    """`archive` after phase 1 left the original unarchived (it was in use)."""
+
+    PHASE2 = "- Recreated: `.venv` with uv sync\n- Pending / unresolved: nothing"
+
+    def setUp(self):
+        super().setUp()
+        f = self.f
+        self.assertEqual(f.run("migrate", f.src, f.dst), 0, f.output)
+        self.archive = os.path.join(os.path.dirname(f.src), f"archive-{dt.date.today().isoformat()}-Proj")
+        record = f.record()
+        record.update(archive=None, phase1="ok (archive pending)")
+        Registry(f.state_dir).save(record)
+        self.note = os.path.join(f.dst, "CLAUDE.local.md")
+        text = read(self.note).replace("- Recreated: (pending, phase 2)\n- Pending / unresolved: (pending, phase 2)",
+                                       self.PHASE2)
+        write(self.note, text)  # phase 2 filled the note in
+
+    def assert_archived_as(self, folder):
+        record = self.f.record()
+        self.assertTrue(paths.same_path(record["archive"], folder))
+        self.assertEqual(record["phase1"], "ok")
+        note = read(self.note)
+        self.assertIn(f"`{folder}`", note)
+        self.assertIn(self.PHASE2, note)  # what phase 2 wrote is kept
+
+    def test_renames_the_original_and_keeps_the_phase2_note(self):
+        f = self.f
+        os.rename(self.archive, f.src)  # as if renaming had failed
+        self.assertEqual(f.run("archive", f.dst), 0, f.output)
+        self.assertFalse(os.path.exists(f.src))
+        self.assert_archived_as(self.archive)
+
+    def test_adopts_an_original_renamed_by_hand(self):
+        f = self.f  # the user renamed it to the archive name: src is gone, archive-<date>-Proj exists
+        self.assertEqual(f.run("archive", f.dst), 0, f.output)
+        self.assertIn("renamed by hand", f.output)
+        self.assert_archived_as(self.archive)
+
+    def test_path_option_adopts_any_folder(self):
+        f = self.f
+        elsewhere = os.path.join(self.tmp, "old-Proj")
+        os.rename(self.archive, elsewhere)
+        self.assertEqual(f.run("archive", f.dst, "--path", elsewhere), 0, f.output)
+        self.assert_archived_as(elsewhere)
+
+    def test_clear_error_when_the_original_is_nowhere(self):
+        f = self.f
+        os.rename(self.archive, os.path.join(self.tmp, "somewhere-else"))
+        self.assertEqual(f.run("archive", f.dst), 2, f.output)
+        self.assertIn("--path", f.output)
+        self.assertEqual(f.record()["phase1"], "ok (archive pending)")
+
+
 class FakeClock:
     """Clock the tests move by hand."""
 

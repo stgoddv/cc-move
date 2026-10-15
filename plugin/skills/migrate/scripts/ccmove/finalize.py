@@ -1,14 +1,18 @@
 """Final steps on the folders: archive the original and leave the note in CLAUDE.local.md."""
 
 import os
+import re
+import stat
 import subprocess
 import time
 
-from .paths import full
+from .paths import full, list_dir
 
 NOTE_START = "<!-- cc-move:start -->"
 NOTE_END = "<!-- cc-move:end -->"
 NOTE_FILE = "CLAUDE.local.md"
+ARCHIVE_LINE = "The original was left intact in `{archive}` until {delete_after}."
+ARCHIVE_IN_NOTE = re.compile(r"(The original was left intact in `)[^`]*(`)")
 
 
 def archive_path(src, date):
@@ -19,6 +23,19 @@ def archive_path(src, date):
     while os.path.exists(candidate):
         candidate, i = os.path.join(parent, f"{name}-{i}"), i + 1
     return candidate
+
+
+def existing_archives(src, date):
+    """Folders that already have the archive name of `src` (archive-<date>-<name>, -2, -3...)."""
+    parent, base = os.path.split(full(src))
+    name = re.compile(re.escape(f"archive-{date}-{base}") + r"(-\d+)?$", re.IGNORECASE)
+    return [os.path.join(parent, n) for n in sorted(list_dir(parent))
+            if name.match(n) and is_real_folder(os.path.join(parent, n))]
+
+
+def is_real_folder(path):
+    """True if `path` is a folder and not a link or junction to one."""
+    return os.path.isdir(path) and not os.lstat(path).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
 
 
 def archive_original(src, date):
@@ -54,7 +71,7 @@ def note_text(record):
         f"## Folder migration ({record['date']})",
         f"This project was moved from `{record['src']}` with cc-move. The copy was verified by hash.",
         *([deps] if deps else []),
-        f"The original was left intact in `{archive}` until {record['delete_after']}.",
+        ARCHIVE_LINE.format(archive=archive, delete_after=record["delete_after"]),
         "If an error appears that did not happen before (missing dependency, nonexistent path, broken link),",
         "suspect the migration first and compare with the archived original.",
         "- Recreated: (pending, phase 2)",
@@ -81,19 +98,49 @@ def _deps_line(record):
 
 def write_note(project, record):
     """Writes the note; if CLAUDE.local.md already exists, appends the section at the end or replaces it."""
-    path = os.path.join(project, NOTE_FILE)
+    content = _read_note_file(project)
     section = note_text(record)
-    if os.path.isfile(path):
-        with open(path, encoding="utf-8") as f:
-            content = f.read()
-        if NOTE_START in content and NOTE_END in content:
-            start, end = content.index(NOTE_START), content.index(NOTE_END) + len(NOTE_END)
-            content = content[:start] + section + content[end:]
-        else:
-            content = content.rstrip("\n") + "\n\n" + section + "\n"
-    else:
+    if content is None:
         content = section + "\n"
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
+    elif _section_bounds(content):
+        start, end = _section_bounds(content)
+        content = content[:start] + section + content[end:]
+    else:
+        content = content.rstrip("\n") + "\n\n" + section + "\n"
+    _write_note_file(project, content)
+
+
+def update_note_archive(project, record):
+    """Puts the archive's final path in the note, keeping the rest of the section (phase 2 may have filled it in).
+    Writes the whole note if there is no section to update."""
+    content = _read_note_file(project)
+    bounds = content and _section_bounds(content)
+    if not bounds or not ARCHIVE_IN_NOTE.search(content, *bounds):
+        return write_note(project, record)
+    start, end = bounds
+    section = ARCHIVE_IN_NOTE.sub(lambda m: m.group(1) + record["archive"] + m.group(2), content[start:end], count=1)
+    _write_note_file(project, content[:start] + section + content[end:])
+
+
+def _section_bounds(content):
+    """(start, end) of the cc-move section in the text of CLAUDE.local.md, or None."""
+    if NOTE_START not in content or NOTE_END not in content:
+        return None
+    return content.index(NOTE_START), content.index(NOTE_END) + len(NOTE_END)
+
+
+def _read_note_file(project):
+    """Text of the project's CLAUDE.local.md, or None if it does not exist."""
+    path = os.path.join(project, NOTE_FILE)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _write_note_file(project, content):
+    """Saves the project's CLAUDE.local.md with Unix line endings."""
+    with open(os.path.join(project, NOTE_FILE), "w", encoding="utf-8", newline="\n") as f:
         f.write(content)
 
 

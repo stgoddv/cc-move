@@ -8,7 +8,8 @@ import sys
 
 from . import Abort, backups, log
 from .claude_state import ClaudeState, count_transcripts, link_problems, relink, transcript_mentions
-from .finalize import archive_original, rename_folder, write_note
+from .finalize import (archive_original, archive_path, existing_archives, is_real_folder, rename_folder,
+                       update_note_archive)
 from .migrate import Migration
 from .paths import disk_case, full, is_under, same_path
 from .rename import CaseRename, is_case_rename
@@ -167,23 +168,54 @@ def _case_rename_problem(dst):
 
 
 def cmd_archive(args, state, registry):
-    """Retries renaming the original when it was in use before."""
+    """Retries renaming the original when it was in use before, or records where it was renamed to by hand."""
     record = registry.find(args.path)
     if _is_case_rename(record):
         raise Abort("A case-only rename keeps the folder in place: there is nothing to archive.")
-    if record.get("archive") and os.path.isdir(record["archive"]):
+    if record.get("archive") and os.path.isdir(record["archive"]) and not args.folder:
         log(f"Already archived: {record['archive']}")
         return
-    target, error = archive_original(record["src"], record["date"])
-    if error:
-        raise Abort(f"Could not rename {record['src']}: {error}")
+    if args.folder:
+        target = _adopt_archive(record, full(args.folder))
+    elif os.path.exists(record["src"]):
+        target, error = archive_original(record["src"], record["date"])
+        if error:
+            raise Abort(f"Could not rename {record['src']}: {error}")
+    else:
+        target = _find_renamed_original(registry, record)
     record["archive"] = target
     if record["phase1"].startswith("ok"):
         record["phase1"] = "ok"
     registry.save(record)
     if os.path.isdir(record["dst"]):
-        write_note(record["dst"], record)  # the note mentions the final name of the archive
+        update_note_archive(record["dst"], record)  # the note mentions the final name of the archive
     log(f"Archived: {target}")
+
+
+def _adopt_archive(record, folder):
+    """Checks that `folder` (given with --path) can be the archived original and returns it."""
+    if os.path.exists(record["src"]):
+        raise Abort(f"The original is still at {record['src']}: run archive without --path to rename it.")
+    if not is_real_folder(folder):
+        raise Abort(f"Not a folder (or it is a link): {folder}")
+    if is_under(folder, record["dst"]) or is_under(record["dst"], folder):
+        raise Abort(f"{folder} is the migrated copy, not the original.")
+    return folder
+
+
+def _find_renamed_original(registry, record):
+    """The archive-<date>-<name> folder the user renamed the original to, when `src` no longer exists."""
+    taken = [r["archive"] for r in registry.all() if r.get("archive") and r["id"] != record["id"]]
+    found = [p for p in existing_archives(record["src"], record["date"]) if not any(same_path(p, t) for t in taken)]
+    if len(found) == 1:
+        log(f"The original was already renamed by hand: {found[0]}")
+        return found[0]
+    if found:
+        raise Abort("The original is gone and several folders could be its archive: " + ", ".join(found)
+                    + ". Choose one with --path <folder>.")
+    name = os.path.basename(archive_path(record["src"], record["date"]))
+    raise Abort(f"The original is not at {record['src']} and no {name} folder exists next to it. "
+                "If you renamed or moved it, give its path with --path <folder>.")
 
 
 def cmd_undo(args, state, registry):
@@ -306,10 +338,13 @@ def _parser():
     s.add_argument("path", nargs="?", help="source or destination path of the migration")
     s.add_argument("--all", action="store_true", help="all completed migrations")
 
-    for name, help_text in (("archive", "retries renaming the original"),
-                            ("undo", "returns the original and the sessions to the old path")):
-        s = sub.add_parser(name, help=help_text)
-        s.add_argument("path", help="source or destination path of the migration")
+    s = sub.add_parser("archive", help="retries renaming the original, or records the folder it was renamed to")
+    s.add_argument("path", help="source or destination path of the migration")
+    s.add_argument("--path", dest="folder", metavar="FOLDER",
+                   help="the original was already renamed or moved by hand to this folder")
+
+    s = sub.add_parser("undo", help="returns the original and the sessions to the old path")
+    s.add_argument("path", help="source or destination path of the migration")
 
     s = sub.add_parser("phase2", help="records the phase 2 result in the registry")
     s.add_argument("path")
