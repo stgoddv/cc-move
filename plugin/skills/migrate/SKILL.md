@@ -123,6 +123,10 @@ Append the findings to the "Phase 2" section of `report.md`.
   Edit tool, not `sed` (backslashes in Windows paths break its patterns). Leave documentation and history files
   alone, and tell the user which ones mention the old path.
 - Offline checks: typecheck, lint, build.
+- Links **outside** the project that point to the old path (for example a junction `C:\X` → the project, made for
+  MAX_PATH; the auditor looks for them): the copy does not move them. This session may not be allowed to change
+  folders at the root of a drive, so give the user the commands, for example
+  `cmd /c rmdir C:\X` and `cmd /c mklink /J C:\X "<destination>"`.
 - If a reinstall fails (package removed from the registry, native build, CUDA), copy that folder from the archived
   original with `robocopy` and note it.
 
