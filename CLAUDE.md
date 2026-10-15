@@ -52,9 +52,9 @@ tests/test_cc_move.py                  end-to-end tests on a synthetic project, 
 | `claude_state.py` | session folders, `~/.claude.json`, history, reassociation, open sessions and windows |
 | `rewriter.py` | replaces the old path with the new one in every form |
 | `editor_state.py` | VS Code per-folder state (`workspaceStorage`): open Claude tabs and the rest |
-| `project_info.py` | git, venvs, lockfiles and old paths written inside the project |
-| `finalize.py` | archiving the original and the `CLAUDE.local.md` note |
-| `registry.py` / `report.py` | `migrations.jsonl` (chronological; `save` replaces in place) and the reports |
+| `project_info.py` | git, venvs, lockfiles, old paths written inside the project, build outputs and caches |
+| `finalize.py` | archiving the original (and why a rename fails), the `CLAUDE.local.md` note |
+| `registry.py` / `report.py` | `migrations.jsonl` (chronological; `save` replaces in place; chains of moves) and the reports |
 | `backups.py` | zip backups of Claude Code's state, 30-day expiry, `prune` (also of pre-0.3 folder backups) |
 | `paths.py` | Windows path utilities |
 
@@ -63,7 +63,9 @@ tests/test_cc_move.py                  end-to-end tests on a synthetic project, 
 - Session folder: `~/.claude/projects/<path with every non-alphanumeric character replaced by ->`. Over 200
   characters Claude Code truncates it and appends a hash; the script refuses such names.
 - Paths appear as `c:\\…` (JSON), `/c/…` (Git Bash), `C:/…`, `file:///c%3A/…` (VS Code URIs, spaces as `%20`),
-  in UPPERCASE (Python extension) and in the encoded folder-name form.
+  in UPPERCASE (Python extension) and in the encoded folder-name form. VS Code's open editors
+  (`memento/workbench.editors.files.textFileEditor`) also keep JSON inside a URI query:
+  `?%7B%22path%22%3A%22c%3A%5C%5CUsers%5C%5C…` (verified 2026-10-15).
 - `~/.claude.json` has `projects` keys that differ only in the drive letter's case (`C:/…` vs `c:/…`).
 - Open sessions: `~/.claude/sessions/<pid>.json` (`cwd`). Open IDE windows with the Claude extension:
   `~/.claude/ide/*.lock` (`pid`, `workspaceFolders`). Lock files of dead processes stay behind; check the pid.
@@ -85,3 +87,7 @@ tests/test_cc_move.py                  end-to-end tests on a synthetic project, 
   ends; a VS Code window reload ends them.
 - Right after closing a VS Code window, renaming its folder can fail for a few seconds ("Access denied");
   `finalize.archive_original` retries.
+- A folder that stays "Access denied" even after a reboot (verified 2026-10-15): the project was installed in editable
+  mode in a global Python, so its folder was in that Python's `sys.path`; Pylance uses it by default and VS Code's
+  file watcher (a `Code.exe` utility process per window) held a folder handle in every window. Restart Manager does
+  not see folder handles; Resource Monitor (Associated Handles) does. `finalize.rename_hint` names such installs.

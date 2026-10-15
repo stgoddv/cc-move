@@ -161,7 +161,8 @@ class Fixture:
             (editor_state.CLAUDE_EXTENSION_KEY,
              json.dumps({"panelTabSessions": [{"sessionId": UUID, "title": "Mi sesión"}], "log": self.src})),
             ("memento/workbench.editors.files.textFileEditor",
-             json.dumps([[uri + "/a.txt", {}], [uri + "/a.txt?" + quote(json.dumps({"path": self.src}), safe=""), {}]])),
+             json.dumps([[uri + "/a.txt", {}],
+                         [uri + "/a.txt?" + quote(json.dumps({"path": self.src}), safe=""), {}]])),
             ("ms-python.python", json.dumps({self.src.upper(): True}).encode("utf-8")),  # BLOB, in upper case
         ]
         con = sqlite3.connect(os.path.join(self.old_storage, "state.vscdb"))
