@@ -12,6 +12,13 @@ LOCKFILES = {
     "poetry.lock", "uv.lock", "Pipfile.lock", "pyproject.toml", "requirements.txt", "requirements-dev.txt",
 }
 MAX_TEXT_FILE = 5_000_000
+# Build outputs and caches: the next build regenerates them, so old paths inside them are noise in the report.
+BUILD_DIRS = {
+    ".cxx", ".gradle", "cdk.out", ".aws-sam", ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".terraform",
+}
+# Generic names that are build outputs only when git ignores them (otherwise they may be source code).
+MAYBE_BUILD_DIRS = {"build", "dist", "out", "target", "obj", "bin"}
 
 
 def git_info(path):
@@ -106,7 +113,8 @@ def _dist_info_list(venv):
 
 def stale_refs(project, rewriter):
     """Text files in the project that still mention the old path. Skips .git and dependency folders:
-    with --with-deps they can hold hundreds of thousands of files, and phase 2 reviews them anyway."""
+    with --with-deps they can hold hundreds of thousands of files, and phase 2 reviews them anyway.
+    Files inside build outputs get a "build" key with that folder, so the report can group them."""
     found = []
     root_path = long_path(project)
     for root, dirs, names in os.walk(root_path):
@@ -119,7 +127,43 @@ def stale_refs(project, rewriter):
             count = rewriter.sub(text)[1]
             if count:
                 found.append({"path": os.path.relpath(path, root_path).replace("\\", "/"), "count": count})
+    builds = build_outputs(project, [x["path"] for x in found])
+    for x in found:
+        if builds[x["path"]]:
+            x["build"] = builds[x["path"]]
     return found
+
+
+def build_outputs(project, rels):
+    """For each relative path ('a/b/c'), the build output or cache folder it is inside ('a/.cxx'), or None."""
+    generic = {p for rel in rels for p in _parent_folders(rel) if _name(p) in MAYBE_BUILD_DIRS}
+    ignored = _git_ignored(project, generic)
+    return {rel: next((p for p in _parent_folders(rel) if _name(p) in BUILD_DIRS or p in ignored), None)
+            for rel in rels}
+
+
+def _parent_folders(rel):
+    """'a/b/c' -> ['a', 'a/b']: the folders that contain it, outermost first."""
+    parts = rel.split("/")
+    return ["/".join(parts[:i]) for i in range(1, len(parts))]
+
+
+def _name(rel):
+    """Last part of a relative path, in lower case."""
+    return rel.rsplit("/", 1)[-1].lower()
+
+
+def _git_ignored(project, rels):
+    """Those of the relative paths `rels` that git ignores (none if it is not a git repo or git fails).
+    Read-only (--no-optional-locks): it also runs on the source, which must not change before the copy."""
+    if not rels or not os.path.exists(os.path.join(project, ".git")):
+        return set()
+    try:  # NUL-separated bytes: in text mode Windows would turn each \n into \r\n, and git would not match them
+        r = subprocess.run(["git", "--no-optional-locks", "-C", project, "check-ignore", "-z", "--stdin"],
+                           input="\0".join(sorted(rels)).encode("utf-8") + b"\0", capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    return set(r.stdout.decode("utf-8", "replace").split("\0")) & set(rels)
 
 
 def _read_small_text(path):

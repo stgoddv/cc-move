@@ -695,6 +695,40 @@ class MigrationTest(FixtureTestCase):
         self.assertEqual(f.record()["phase1"], "undone")
 
 
+class BuildOutputsTest(FixtureTestCase):
+    """Old paths and dependency folders inside build outputs are reported apart, grouped by folder."""
+
+    def setUp(self):
+        super().setUp()
+        f = self.f
+        for rel in ("android/app/.cxx/a/x.txt", "android/app/.cxx/b/y.txt", "build/y.txt", "dist/z.txt"):
+            write(os.path.join(f.src, *rel.split("/")), f"path = {f.src}\\x\n")
+        write(os.path.join(f.src, "infra", "cdk.out", "asset.1", "node_modules", "m", "i.js"), "m\n")
+        with open(os.path.join(f.src, ".gitignore"), "a", encoding="utf-8") as fh:
+            fh.write("build/\n")  # an ignored 'build' is an output; 'dist' is not ignored, so it may be code
+        self.assertEqual(f.run("migrate", f.src, f.dst), 0, f.output)
+        record = f.record()
+        self.report = read_json(os.path.join(record["report_dir"], "report.json"))
+        self.report_md = read(os.path.join(record["report_dir"], "report.md"))
+
+    def test_old_paths_in_build_outputs_are_grouped(self):
+        builds = {x["path"]: x.get("build") for x in self.report["stale_refs"]}
+        self.assertEqual(builds, {"config.txt": None, "dist/z.txt": None, "build/y.txt": "build",
+                                  "android/app/.cxx/a/x.txt": "android/app/.cxx",
+                                  "android/app/.cxx/b/y.txt": "android/app/.cxx"})
+        self.assertIn("- `android/app/.cxx/`: 2 files (2 mentions)", self.report_md)
+        self.assertIn("- `dist/z.txt` (1)", self.report_md)
+        self.assertNotIn("- `android/app/.cxx/a/x.txt`", self.report_md)
+
+    def test_dependencies_inside_build_outputs_are_not_to_reinstall(self):
+        f = self.f
+        record = f.record()
+        self.assertEqual(record["build_dep_dirs"], ["infra/cdk.out/asset.1/node_modules"])
+        self.assertNotIn("infra/cdk.out/asset.1/node_modules", record["dep_dirs"])
+        self.assertIn("do not reinstall", self.report_md)
+        self.assertIn("1 more inside build outputs", read(os.path.join(f.dst, "CLAUDE.local.md")))
+
+
 class ArchiveTest(FixtureTestCase):
     """`archive` after phase 1 left the original unarchived (it was in use)."""
 
