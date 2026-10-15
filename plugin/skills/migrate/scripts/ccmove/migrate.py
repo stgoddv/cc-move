@@ -305,7 +305,7 @@ class Migration:
         if error:
             self.details["warnings"].append(
                 f"Could not rename the original ({error}). Close whatever uses it (VS Code, terminals, "
-                f"node) and run: python cc_move.py archive \"{self.dst}\"")
+                f"node) and run: python cc_move.py archive \"{self.dst}\". {finalize.rename_hint(self.src)}")
             log(f"  WARNING: could not rename the original: {error}")
         else:
             log(f"  {target}")

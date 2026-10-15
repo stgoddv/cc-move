@@ -70,6 +70,10 @@ class PathRewriter:
         low = text.lower()
         return any(n in low for n in self._needles)
 
+    def finds(self, text):
+        """True if the old path appears in `text` in any of its forms."""
+        return self.might_match(text) and any(regex.search(text) for regex, _ in self.rules)
+
     def sub(self, text):
         """Returns (new text, number of replacements that changed something).
 

@@ -18,6 +18,7 @@ import tempfile
 import unittest
 import zipfile
 from contextlib import redirect_stdout
+from unittest import mock
 from urllib.parse import quote
 
 import _winapi
@@ -869,6 +870,40 @@ class ArchiveTest(FixtureTestCase):
         self.assertEqual(f.run("archive", f.dst), 2, f.output)
         self.assertIn("--path", f.output)
         self.assertEqual(f.record()["phase1"], "ok (archive pending)")
+
+
+class EditableInstallTest(unittest.TestCase):
+    """A global Python with the project installed in editable mode keeps its folder open in VS Code."""
+
+    def setUp(self):
+        self.tmp = paths.full(tempfile.mkdtemp(prefix="ccmove-"))
+        self.project = os.path.join(self.tmp, "Proj")
+        os.makedirs(os.path.join(self.project, "src"))
+        local, roaming = os.path.join(self.tmp, "local"), os.path.join(self.tmp, "roaming")
+        self.site = os.path.join(local, "Programs", "Python", "Python313", "Lib", "site-packages")
+        self.user_site = os.path.join(roaming, "Python", "Python313", "site-packages")
+        patches = [mock.patch.dict(os.environ, {"LOCALAPPDATA": local, "APPDATA": roaming}),
+                   mock.patch.object(sys, "base_prefix", os.path.join(self.tmp, "none")),
+                   mock.patch.object(finalize, "launcher_pythons", return_value=[])]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_finds_pth_and_direct_url_pointing_into_the_project(self):
+        pth = os.path.join(self.site, "_editable_impl_proj.pth")
+        write(pth, self.project + "\\src\n")
+        direct_url = os.path.join(self.user_site, "proj-0.1.dist-info", "direct_url.json")
+        write(direct_url, json.dumps({"url": "file:///" + forward(self.project), "dir_info": {"editable": True}}))
+        write(os.path.join(self.site, "other.pth"), self.project + "2\\src\n")  # a sibling: not this project
+        self.assertEqual(finalize.editable_installs(self.project), [pth, direct_url])
+        hint = finalize.rename_hint(self.project)
+        self.assertIn("_editable_impl_proj.pth", hint)
+        self.assertIn("resmon", hint)
+
+    def test_nothing_found_still_explains_how_to_look(self):
+        self.assertEqual(finalize.editable_installs(self.project), [])
+        self.assertIn("Associated Handles", finalize.rename_hint(self.project))
 
 
 class FakeClock:

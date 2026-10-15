@@ -1,13 +1,16 @@
 """Final steps on the folders: archive the original and leave the note in CLAUDE.local.md."""
 
+import glob
 import os
 import re
 import stat
 import subprocess
+import sys
 import time
 
 from .paths import full, list_dir
 from .registry import source_is_copy
+from .rewriter import PathRewriter
 
 NOTE_START = "<!-- cc-move:start -->"
 NOTE_END = "<!-- cc-move:end -->"
@@ -63,6 +66,67 @@ def rename_folder(src, target, attempts=5, wait=2):
             if attempt < attempts - 1:
                 time.sleep(wait)
     return str(error)
+
+
+def rename_hint(folder):
+    """What may be keeping `folder` open when Windows refuses to rename it, and how to find out."""
+    hints = [f"{path} installs this project in editable mode in a global Python: Pylance (which uses that Python by "
+             "default) and VS Code's file watcher then keep the folder open in every VS Code window. Uninstall the "
+             "package from that Python (pip uninstall, or uv pip uninstall --python <that python>) and restart "
+             "Pylance or the extension host." for path in editable_installs(folder)]
+    hints.append("To see which process holds the folder: Resource Monitor (resmon) > CPU > Associated Handles, "
+                 "search for its name (Explorer does not name it, and Restart Manager does not see folder handles).")
+    return " ".join(hints)
+
+
+def editable_installs(folder):
+    """Files in the global Pythons' site-packages that install a package in editable mode from inside `folder`
+    (*.pth, setuptools' __editable__ finders, direct_url.json)."""
+    finder = PathRewriter(folder, folder)  # recognizes the path in every form it is written in
+    found = []
+    for site in python_site_dirs():
+        for name in list_dir(site):
+            low = name.lower()
+            if low.endswith(".pth") or (low.startswith("__editable__") and low.endswith(".py")):
+                path = os.path.join(site, name)
+            elif low.endswith(".dist-info"):
+                path = os.path.join(site, name, "direct_url.json")
+            else:
+                continue
+            text = _read_text(path)
+            if text and finder.finds(text):
+                found.append(path)
+    return found
+
+
+def python_site_dirs():
+    """site-packages folders of the Python installations outside any venv: the python.org installs, this Python,
+    those the py launcher knows, and the per-user site-packages."""
+    prefixes = glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python", "Python*"))
+    prefixes += [sys.base_prefix] + launcher_pythons()
+    dirs = [os.path.join(p, "Lib", "site-packages") for p in prefixes]
+    dirs += glob.glob(os.path.join(os.environ.get("APPDATA", ""), "Python", "Python3*", "site-packages"))
+    unique = {os.path.normcase(os.path.abspath(d)): d for d in dirs if os.path.isdir(d)}
+    return sorted(unique.values(), key=str.lower)
+
+
+def launcher_pythons():
+    """Installation folders listed by `py -0p` (none if the py launcher is missing or fails)."""
+    try:
+        r = subprocess.run(["py", "-0p"], capture_output=True, text=True, errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    exes = re.findall(r"([A-Za-z]:\\.*?\.exe)\s*$", r.stdout, re.MULTILINE)
+    return [os.path.dirname(exe) for exe in exes]
+
+
+def _read_text(path):
+    """Contents of a small text file, or None if it does not exist or cannot be read."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read(1_000_000)
+    except OSError:
+        return None
 
 
 def note_text(record, chain=(), earlier_note=None):

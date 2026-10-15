@@ -11,7 +11,7 @@ from . import Abort, backups, log
 from .claude_state import ClaudeState, count_transcripts, link_problems, relink, transcript_mentions
 from .copying import create_link
 from .finalize import (archive_original, archive_path, existing_archives, is_real_folder, rename_folder,
-                       update_note_archive)
+                       rename_hint, update_note_archive)
 from .migrate import Migration
 from .paths import disk_case, full, is_under, long_path, same_path
 from .rename import CaseRename, is_case_rename
@@ -187,7 +187,7 @@ def cmd_archive(args, state, registry):
     elif os.path.exists(record["src"]):
         target, error = archive_original(record["src"], record["date"])
         if error:
-            raise Abort(f"Could not rename {record['src']}: {error}")
+            raise Abort(f"Could not rename {record['src']}: {error}. {rename_hint(record['src'])}")
     else:
         target = _find_renamed_original(registry, record)
     record["archive"] = target

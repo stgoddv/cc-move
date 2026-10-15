@@ -68,6 +68,14 @@ The migration has two phases:
    `python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py archive "<destination>"`. It keeps what phase 2 wrote in the note.
    If the user already renamed the original by hand to `archive-<date>-<name>`, the same command finds it; if they
    gave it another name or moved it, add `--path "<that folder>"`.
+   - If it stays "Access denied" even after closing everything (or rebooting): a common cause is the project
+     installed in **editable mode in a global Python** (`pip install -e` or `uv pip install` outside a venv leaves a
+     `*.pth` or `direct_url.json` pointing into it). Pylance uses that Python by default and VS Code's file watcher
+     then keeps a handle on the folder in **every** window. The script names such files when the rename fails.
+     Fix: uninstall the package from that Python and restart Pylance (or the extension host), then run `archive`.
+   - To find the process holding the folder, the user can open Resource Monitor (`resmon` → CPU → Associated
+     Handles) and search for the folder name. Explorer does not name it, and Restart Manager does not see folder
+     handles.
 
 The report is in `%LOCALAPPDATA%\cc-move\reports\<date>-<name>\`: `report.md` (readable summary, start of phase 2),
 `report.json`, the manifests, `robocopy.log`, `progress.txt` and `venvs\*.freeze.txt` (packages of each virtual
