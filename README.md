@@ -6,6 +6,12 @@
 A [Claude Code](https://claude.com/claude-code) plugin that moves or renames a project folder **without losing its
 Claude Code sessions**. Windows only.
 
+```
+/cc-move:migrate C:\Users\me\OneDrive\Desktop\my-app C:\Users\me\code\my-app     move it
+/cc-move:migrate C:\Users\me\code\my-app C:\Users\me\code\shop-app               rename it
+/cc-move:migrate C:\Users\me\code\MyApp C:\Users\me\code\myapp                   change only the case
+```
+
 ## Why
 
 Claude Code ties every session to the folder's path. If you move or rename a project folder by hand, the session
@@ -22,7 +28,9 @@ cc-move moves or renames the folder and brings all of that along:
 - the original folder, which is **kept** and renamed to `archive-<date>-<name>` so you can delete it later, once you
   are sure everything works.
 
-Then Claude audits the moved project and repairs what a copy cannot carry over (dependencies, absolute paths in
+To cc-move, a rename is a move whose destination is in the same parent folder, so both get the same care.
+
+Then Claude audits the moved or renamed project and repairs what a copy cannot carry over (dependencies, absolute paths in
 local config), without committing or deploying anything.
 
 ## Requirements
@@ -53,7 +61,8 @@ Restart Claude Code (or open a new session). Type `/cc-move` and the `/cc-move:m
 
 ## Move or rename a project
 
-Say you want to move `C:\Users\me\OneDrive\Desktop\my-app` to `C:\Users\me\code\my-app`.
+Say you want to move `C:\Users\me\OneDrive\Desktop\my-app` to `C:\Users\me\code\my-app`, or rename it to
+`C:\Users\me\OneDrive\Desktop\shop-app`. The steps are the same.
 
 1. **Close the project.** Close the VS Code window that has `my-app` open, and any Claude Code session running in
    it. Other VS Code windows can stay open.
@@ -64,14 +73,14 @@ Say you want to move `C:\Users\me\OneDrive\Desktop\my-app` to `C:\Users\me\code\
 
    ```
    /cc-move:migrate C:\Users\me\OneDrive\Desktop\my-app C:\Users\me\code\my-app
+   /cc-move:migrate C:\Users\me\OneDrive\Desktop\my-app C:\Users\me\OneDrive\Desktop\shop-app
    ```
 
-   Or just ask in your own words: *"use cc-move to move C:\Users\me\OneDrive\Desktop\my-app to
-   C:\Users\me\code\my-app"*.
+   Or just ask in your own words: *"use cc-move to move C:\Users\me\OneDrive\Desktop\my-app to C:\Users\me\code"*,
+   *"use cc-move to rename my-app to shop-app"*.
 
-   The destination can have a different name: move and rename at once (`...\Desktop\MyApp` → `...\code\my-app`), or
-   keep the same parent folder to only rename (`...\code\MyApp` → `...\code\my-app`). A rename works like any move:
-   the folder is copied and verified, and the original is archived. To change only the letter case, see
+   You can also move and rename at once (`...\Desktop\MyApp` → `...\code\my-app`). A rename works like a move: the
+   folder is copied and verified, and the original is archived. To change only the letter case, see
    [Change the case of a folder name](#change-the-case-of-a-folder-name).
 
 4. **Review the dry run.** Claude first shows what would change (files, sessions, settings, open tabs) without
@@ -115,7 +124,7 @@ under the old name, with the old state, and show the old case in the title.
 ### Several projects
 
 Give Claude the list in one session (`/cc-move:migrate` and then the pairs of paths, one project per line). It
-moves them one at a time and stops at the first failure.
+moves or renames them one at a time and stops at the first failure.
 
 ## What happens, step by step
 

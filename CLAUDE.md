@@ -1,7 +1,7 @@
 # cc-move — development guide
 
-cc-move is a Claude Code plugin that moves a project folder to a new path without losing its Claude Code
-sessions. Claude Code ties sessions to the folder by its path, so moving a folder by hand orphans them.
+cc-move is a Claude Code plugin that moves or renames a project folder without losing its Claude Code
+sessions. Claude Code ties sessions to the folder by its path, so moving or renaming a folder by hand orphans them.
 The user-facing procedure lives in `plugin/skills/migrate/SKILL.md`; this file is for working on the code.
 
 ## Layout
