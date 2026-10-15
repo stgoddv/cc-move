@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 — 2026-10-15
+
+- The README, the plugin and marketplace descriptions and the skill now say that cc-move renames folders as well as
+  moving them (a rename is a move within the same parent folder). The skill's description mentions renames and
+  case changes, so asking Claude to "rename my project folder" now triggers `/cc-move:migrate`. No code changes.
+
 ## 0.3.0 — 2026-10-14
 
 - Backups of Claude Code's state are now one zip per migration, kept **30 days**. Each `migrate` deletes expired

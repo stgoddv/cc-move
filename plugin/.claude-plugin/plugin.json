@@ -1,6 +1,6 @@
 {
   "name": "cc-move",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Move or rename a project folder and bring its Claude Code sessions, settings and VS Code tabs along. Windows only.",
   "author": {
     "name": "stgoddv",
