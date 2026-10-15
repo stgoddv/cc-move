@@ -4,14 +4,16 @@ import argparse
 import datetime as dt
 import json
 import os
+import stat
 import sys
 
 from . import Abort, backups, log
 from .claude_state import ClaudeState, count_transcripts, link_problems, relink, transcript_mentions
+from .copying import create_link
 from .finalize import (archive_original, archive_path, existing_archives, is_real_folder, rename_folder,
                        update_note_archive)
 from .migrate import Migration
-from .paths import disk_case, full, is_under, same_path
+from .paths import disk_case, full, is_under, long_path, same_path
 from .rename import CaseRename, is_case_rename
 from .progress import DEFAULT_INTERVAL
 from .registry import Registry
@@ -218,6 +220,36 @@ def _find_renamed_original(registry, record):
                 "If you renamed or moved it, give its path with --path <folder>.")
 
 
+def cmd_recreate_links(args, state, registry):
+    """Creates the links phase 1 could not create, now that their targets exist (after reinstalling dependencies)."""
+    record = registry.find(args.path)
+    dst = record["dst"]
+    if not os.path.isdir(dst):
+        raise Abort(f"The migrated folder no longer exists: {dst}")
+    with open(os.path.join(record["report_dir"], "report.json"), encoding="utf-8") as f:
+        failed = (json.load(f).get("links") or {}).get("failed", [])
+    if not failed:
+        log("Phase 1 created every link: nothing to do.")
+    pending = 0
+    for x in failed:
+        link = os.path.join(dst, x["path"].replace("/", "\\"))
+        if os.path.lexists(long_path(link)):
+            is_link = os.lstat(long_path(link)).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            log(f"Already there: {x['path']}" if is_link else
+                f"Left alone: {x['path']} is a real folder now (npm workspaces install one there instead of a link)")
+        elif not os.path.exists(x["target"]):
+            pending += 1
+            log(f"Still pending: {x['path']} (its target {x['target']} does not exist yet; reinstall first)")
+        else:
+            try:
+                create_link(x["kind"], x["target"], link)
+                log(f"Created: {x['path']} ({x['kind']} → {x['target']})")
+            except OSError as e:
+                pending += 1
+                log(f"Could not create {x['path']}: {e}")
+    return 1 if pending else 0
+
+
 def cmd_undo(args, state, registry):
     """Returns the original to its name and the sessions to the old path. Does not delete the copy."""
     record = registry.find(args.path)
@@ -346,6 +378,9 @@ def _parser():
     s = sub.add_parser("undo", help="returns the original and the sessions to the old path")
     s.add_argument("path", help="source or destination path of the migration")
 
+    s = sub.add_parser("recreate-links", help="creates the links phase 1 left pending, once their targets exist")
+    s.add_argument("path", help="source or destination path of the migration")
+
     s = sub.add_parser("phase2", help="records the phase 2 result in the registry")
     s.add_argument("path")
     s.add_argument("--status", required=True, choices=["ok", "partial", "failed"])
@@ -365,6 +400,7 @@ COMMANDS = {
     "verify": cmd_verify,
     "archive": cmd_archive,
     "undo": cmd_undo,
+    "recreate-links": cmd_recreate_links,
     "phase2": cmd_phase2,
     "status": cmd_status,
     "prune": cmd_prune,

@@ -211,17 +211,35 @@ def copied_bytes(line):
 
 
 def recreate_links(tree, dst):
-    """Creates the source's links in `dst`; those that pointed inside the project are repointed to the destination."""
+    """Creates the source's links in `dst`; those that pointed inside the project are repointed to the destination.
+
+    A link to a dependency folder that was not copied (apps/x/node_modules -> <root>/node_modules) cannot be created
+    yet: it is marked `after_deps`, to be recreated after reinstalling (the `recreate-links` command).
+    """
     created, failed = [], []
     for rel, kind, target, norm in tree.links:
-        link = long_path(os.path.join(dst, rel.replace("/", "\\")))
+        link = os.path.join(dst, rel.replace("/", "\\"))
         new_target = full(dst + norm[len(ROOT):].replace("/", "\\")) if norm.startswith(ROOT) else target
         try:
-            if kind == "junction":
-                _winapi.CreateJunction(new_target, link)
-            else:  # creating symlinks may require developer mode or administrator
-                os.symlink(new_target, link, target_is_directory=(kind == "symlinkd"))
+            create_link(kind, new_target, link)
             created.append({"path": rel, "kind": kind, "target": new_target, "remapped": new_target != target})
         except OSError as e:
-            failed.append({"path": rel, "kind": kind, "target": new_target, "error": str(e)})
+            failed.append({"path": rel, "kind": kind, "target": new_target, "error": str(e),
+                           "after_deps": _excluded_dependency(tree, norm)})
     return created, failed
+
+
+def create_link(kind, target, link):
+    """Creates a junction, a folder symlink ('symlinkd') or a file symlink at `link` pointing to `target`."""
+    if kind == "junction":
+        _winapi.CreateJunction(target, long_path(link))
+    else:  # creating symlinks may require developer mode or administrator
+        os.symlink(target, long_path(link), target_is_directory=(kind == "symlinkd"))
+
+
+def _excluded_dependency(tree, norm):
+    """True if a link target (normalized, <ROOT>/...) is inside a dependency folder that was not copied."""
+    if tree.with_deps or not norm.startswith(ROOT + "/"):
+        return False
+    rel = norm[len(ROOT) + 1:].lower()
+    return any(rel == dep.lower() or rel.startswith(dep.lower() + "/") for dep, _ in tree.deps)

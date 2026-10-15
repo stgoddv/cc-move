@@ -100,7 +100,13 @@ def _links(details):
     created, failed = links.get("created", []), links.get("failed", [])
     lines = ["", "### Links (junctions/symlinks)",
              f"- Recreated: {len(created)} (repointed to the destination: {sum(1 for x in created if x['remapped'])})"]
-    lines += [f"- PENDING `{x['path']}` ({x['kind']} → `{x['target']}`): {x['error']}" for x in failed]
+    for x in failed:
+        if x.get("after_deps"):
+            reason = ("its target is a dependency folder that was not copied: recreate it after reinstalling the "
+                      "dependencies, with the `recreate-links` command")
+        else:
+            reason = x["error"]
+        lines.append(f"- PENDING `{x['path']}` ({x['kind']} → `{x['target']}`): {reason}")
     return lines
 
 

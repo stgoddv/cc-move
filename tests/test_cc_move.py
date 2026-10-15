@@ -729,6 +729,43 @@ class BuildOutputsTest(FixtureTestCase):
         self.assertIn("1 more inside build outputs", read(os.path.join(f.dst, "CLAUDE.local.md")))
 
 
+class PendingLinksTest(FixtureTestCase):
+    """A link to a dependency folder that is not copied (a monorepo's apps/m/node_modules -> root node_modules)."""
+
+    def setUp(self):
+        super().setUp()
+        f = self.f
+        os.makedirs(os.path.join(f.src, "apps", "m"))
+        _winapi.CreateJunction(os.path.join(f.src, "node_modules"), os.path.join(f.src, "apps", "m", "node_modules"))
+        self.assertEqual(f.run("migrate", f.src, f.dst), 0, f.output)
+        self.link = os.path.join(f.dst, "apps", "m", "node_modules")
+
+    def test_report_says_to_recreate_it_after_reinstalling(self):
+        record = self.f.record()
+        failed = read_json(os.path.join(record["report_dir"], "report.json"))["links"]["failed"]
+        self.assertEqual([(x["path"], x["after_deps"]) for x in failed], [("apps/m/node_modules", True)])
+        self.assertIn("recreate-links", read(os.path.join(record["report_dir"], "report.md")))
+
+    def test_recreate_links_once_the_target_exists(self):
+        f = self.f
+        self.assertEqual(f.run("recreate-links", f.dst), 1, f.output)  # nothing reinstalled yet
+        self.assertIn("Still pending", f.output)
+        os.makedirs(os.path.join(f.dst, "node_modules"))  # as after npm ci
+        self.assertEqual(f.run("recreate-links", f.dst), 0, f.output)
+        self.assertTrue(paths.same_path(paths.strip_long_prefix(os.readlink(self.link)),
+                                        os.path.join(f.dst, "node_modules")))
+        self.assertEqual(f.run("recreate-links", f.dst), 0, f.output)
+        self.assertIn("Already there", f.output)
+
+    def test_a_real_folder_installed_there_is_left_alone(self):
+        f = self.f
+        os.makedirs(os.path.join(f.dst, "node_modules"))
+        os.makedirs(os.path.join(self.link, "pkg"))  # npm workspaces install a real folder instead
+        self.assertEqual(f.run("recreate-links", f.dst), 0, f.output)
+        self.assertIn("Left alone", f.output)
+        self.assertTrue(os.path.isdir(os.path.join(self.link, "pkg")))
+
+
 class ArchiveTest(FixtureTestCase):
     """`archive` after phase 1 left the original unarchived (it was in use)."""
 
@@ -850,6 +887,7 @@ class ConfirmHookTest(unittest.TestCase):
                         r'python C:/p/cc_move.py --state-dir "C:\s" undo "C:\b"',
                         r'cd C:\x && py -3 C:\p\cc_move.py archive "C:\b"',
                         r'python C:/p/cc_move.py relink "C:\a" "C:\b"',
+                        r'python C:/p/cc_move.py recreate-links "C:\b"',
                         r'python C:/p/cc_move.py prune',
                         r'python C:/p/cc_move.py prune --older-than 0'):
             self.assertTrue(self.needs_approval(command), command)
