@@ -7,13 +7,18 @@ from urllib.parse import quote
 from .paths import full, list_dir, match_case, project_dir_name, split_drive
 
 TEXT_EXTS = {".jsonl", ".json", ".md", ".txt"}
+# Where an encoded folder name ends: like a plain one, or at an encoded separator or quote (%5C, %2F, %22...),
+# but not at %20, so 'Proj%20old' (a sibling 'Proj old') is not taken for 'Proj'.
+END_OF_ENCODED_NAME = (r"(?=$|[\\/\"'`)\]}>,;:|*?<#&\s]|%(?:5C|2F|22|27|3F|23|26|2C|29|3E|5D|7D)"
+                       r"|\.(?![A-Za-z0-9_-]))")
 
 
 class PathRewriter:
     """Replaces the path `src` with `dst` inside a text.
 
     Recognized forms: C:\\x, C:\\\\x (JSON), C:\\\\\\\\x (JSON inside JSON), C:/x,
-    /c/x (Git Bash), c%3A/x (VS Code URI) and the encoded name in ~/.claude/projects (c--x).
+    /c/x (Git Bash), c%3A/x (VS Code URI), c%3A%5C%5Cx, c%3A%5Cx and c%3A%2Fx (a path encoded inside a URI)
+    and the encoded name in ~/.claude/projects (c--x).
     It only replaces if the path ends where the folder name ends:
     when moving 'Proj' it does not touch 'Proj2', 'Proj-old' or 'Proj.bak'.
     """
@@ -32,10 +37,16 @@ class PathRewriter:
         pattern = r"(?<![\w.:/-])/" + drive + _joined(s_parts, "/") + end
         self._add(pattern, d_drive, "/" + "/".join(d_parts), prefix="/")
 
-        # VS Code URI: file:///c%3A/Users/a%20b
+        # VS Code URI: file:///c%3A/Users/a%20b, and paths encoded whole inside a URI query, where the backslashes
+        # are escaped too: ?%7B%22path%22%3A%22c%3A%5C%5CUsers%5C%5Ca%20b%22%7D (JSON inside a URI).
         s_uri, d_uri = [uri_quote(p) for p in s_parts], [uri_quote(p) for p in d_parts]
-        pattern = r"(?<![A-Za-z0-9])" + drive + "%3A" + _joined(s_uri, "/") + end
-        self._add(pattern, d_drive, "%3A/" + "/".join(d_uri))
+        after_escape = r"(?:(?<![A-Za-z0-9])|(?<=%[0-9A-Fa-f]{2}))"  # %22c%3A...: the quote before it is encoded
+        for sep in ("/", "%5C%5C", "%5C", "%2F"):
+            rest = "".join(re.escape(sep) + re.escape(p) for p in s_uri[1:])
+            pattern = (after_escape + drive + "(?P<c>%3A)(?P<s>" + re.escape(sep) + ")" + re.escape(s_uri[0]) + rest
+                       + END_OF_ENCODED_NAME)
+            # The escapes keep the case they were found in (%5c stays %5c), or a case-only rename would count them.
+            self._add(pattern, d_drive, lambda m: m.group("c") + m.group("s") + m.group("s").join(d_uri))
 
         s_enc, d_enc = project_dir_name(full(src)), project_dir_name(full(dst))
         pattern = r"(?<![A-Za-z0-9-])" + drive + re.escape(s_enc[1:]) + r"(?![A-Za-z0-9-])"
@@ -45,10 +56,11 @@ class PathRewriter:
         self._needles = {base.lower(), project_dir_name(base).lower(), uri_quote(base).lower()}
 
     def _add(self, pattern, drive, tail, prefix=""):
-        """Registers one form of the path. The replacement keeps the case of the drive letter found,
+        """Registers one form of the path. `tail` is the text after the drive letter, or a function of the match
+        that returns it. The replacement keeps the case of the drive letter found,
         and is all upper case if what was found was (the Python extension stores paths that way)."""
         def replacement(m):
-            new = prefix + match_case(drive, m.group("d")) + tail
+            new = prefix + match_case(drive, m.group("d")) + (tail(m) if callable(tail) else tail)
             return new.upper() if m.group(0).isupper() else new
 
         self.rules.append((re.compile(pattern, re.IGNORECASE), replacement))

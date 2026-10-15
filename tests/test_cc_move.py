@@ -18,6 +18,7 @@ import tempfile
 import unittest
 import zipfile
 from contextlib import redirect_stdout
+from urllib.parse import quote
 
 import _winapi
 
@@ -158,7 +159,8 @@ class Fixture:
         rows = [
             (editor_state.CLAUDE_EXTENSION_KEY,
              json.dumps({"panelTabSessions": [{"sessionId": UUID, "title": "Mi sesión"}], "log": self.src})),
-            ("memento/workbench.editors.files.textFileEditor", json.dumps([[uri + "/a.txt", {}]])),
+            ("memento/workbench.editors.files.textFileEditor",
+             json.dumps([[uri + "/a.txt", {}], [uri + "/a.txt?" + quote(json.dumps({"path": self.src}), safe=""), {}]])),
             ("ms-python.python", json.dumps({self.src.upper(): True}).encode("utf-8")),  # BLOB, in upper case
         ]
         con = sqlite3.connect(os.path.join(self.old_storage, "state.vscdb"))
@@ -225,6 +227,26 @@ class RewriterTest(unittest.TestCase):
         self.assertEqual(rw.sub("file:///c%3A/U/OneDrive/Desktop/A%20B/x.md")[0],
                          "file:///c%3A/U/Desktop/repos/A%20B/x.md")
         self.assertEqual(rw.sub(r'{"C:\\U\\ONEDRIVE\\DESKTOP\\A B":1}')[0], r'{"C:\\U\\DESKTOP\\REPOS\\A B":1}')
+
+    def test_uri_encoded_backslashes(self):
+        rw = rewriter.PathRewriter(r"C:\U\OneDrive\Desktop\Proj", r"C:\U\Desktop\repos\Proj")
+        cases = {  # JSON inside a URI query (VS Code's open editors), single backslashes, lower case, %2F
+            "x.md?%7B%22path%22%3A%22c%3A%5C%5CU%5C%5COneDrive%5C%5CDesktop%5C%5CProj%5C%5Ca.md%22%7D":
+                "x.md?%7B%22path%22%3A%22c%3A%5C%5CU%5C%5CDesktop%5C%5Crepos%5C%5CProj%5C%5Ca.md%22%7D",
+            "c%3A%5CU%5COneDrive%5CDesktop%5CProj%22": "c%3A%5CU%5CDesktop%5Crepos%5CProj%22",
+            "c%3a%5cU%5cOneDrive%5cDesktop%5cProj": "c%3a%5cU%5cDesktop%5crepos%5cProj",
+            "C%3A%2FU%2FOneDrive%2FDesktop%2FProj%2Fa": "C%3A%2FU%2FDesktop%2Frepos%2FProj%2Fa",
+        }
+        for before, after in cases.items():
+            self.assertEqual(rw.sub(before), (after, 1), before)
+        for text in ("c%3A%5C%5CU%5C%5COneDrive%5C%5CDesktop%5C%5CProj2", "c%3A%5CU%5COneDrive%5CDesktop%5CProj%20old",
+                     "c%3A%2FU%2FOneDrive%2FDesktop%2FProj-old", "file:///c%3A/U/OneDrive/Desktop/Proj%20old/x"):
+            self.assertEqual(rw.sub(text), (text, 0), text)
+
+    def test_case_only_rename_keeps_the_case_of_uri_escapes(self):
+        rw = rewriter.PathRewriter(r"C:\U\Desktop\Proj", r"C:\U\Desktop\proj")
+        self.assertEqual(rw.sub("c%3a%5cU%5cDesktop%5cProj"), ("c%3a%5cU%5cDesktop%5cproj", 1))
+        self.assertEqual(rw.sub("c%3a%5cU%5cDesktop%5cproj"), ("c%3a%5cU%5cDesktop%5cproj", 0))
 
     def test_case_only_rename_changes_every_form_and_counts_only_real_changes(self):
         rw = rewriter.PathRewriter(r"C:\U\Desktop\Proj", r"C:\U\Desktop\proj")
@@ -625,6 +647,8 @@ class MigrationTest(FixtureTestCase):
         self.assertEqual(tabs["log"], f.dst)
         memento = f.editor_item(new_storage, "memento/workbench.editors.files.textFileEditor")
         self.assertIn(editor_state.folder_uri(f.dst) + "/a.txt", memento)
+        self.assertIn(quote(in_json(f.dst), safe=""), memento)  # JSON inside a URI query
+        self.assertNotIn(quote(in_json(f.src), safe=""), memento)
         self.assertIn(in_json(f.dst.upper()), f.editor_item(new_storage, "ms-python.python"))
         self.assertIn(in_json(f.dst), read(os.path.join(new_storage, "chatSessions", "c.jsonl")))
         self.assertIn(in_json(f.src), f.editor_item(f.old_storage, editor_state.CLAUDE_EXTENSION_KEY))  # untouched
