@@ -164,9 +164,12 @@ Tell the user to:
    old path). The Claude tabs that were open should reappear, and the
    session history should be complete. VS Code asks whether to trust the folder: trusting the destination's parent
    folder once avoids the question for every project moved there.
-2. Optionally run the `verify --all` command the script printed at the end, from a regular terminal. Users have
-   reported that an open session can rewrite `~/.claude.json` from memory when it closes (not reproduced so far);
-   `verify --all` repairs it if it happens.
+2. Optionally run the `verify "<destination>"` command the script printed at the end, once per migrated project,
+   from a regular terminal. Users have reported that an open session can rewrite `~/.claude.json` from memory when
+   it closes (not reproduced so far); `verify "<destination>"` repairs it if it happens.
+
+Do not run `verify --all` unless the user asks for it: it checks every migration ever made on the machine and scans
+all their transcripts, which can take many minutes. To check this batch, verify each destination.
 
 ## Other commands
 

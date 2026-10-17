@@ -73,7 +73,7 @@ tests/test_cc_move.py                  end-to-end tests on a synthetic project, 
   `ItemTable`), with `<id>` = md5(path with lowercase drive + creation time in ms). The Claude extension stores
   the open tabs under `Anthropic.claude-code` → `panelTabSessions`.
 - Reported by users on GitHub (#86713, #96018) but **not reproduced** here: an open session rewriting
-  `~/.claude.json` from memory when it closes. `verify --all` repairs it if it ever happens.
+  `~/.claude.json` from memory when it closes. `verify <new path>` repairs it if it ever happens.
 - Case-only rename (verified 2026-10-14): `os.rename('demo', 'Demo')` works on NTFS; Claude Code keeps finding the
   sessions (same session folder, NTFS ignores case) and creates no new `~/.claude.json` key, but VS Code's
   `workspaceStorage` id changes (md5 includes the exact case), so the state must be copied. Every path comparison in

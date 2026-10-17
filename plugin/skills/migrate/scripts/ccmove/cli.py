@@ -55,7 +55,9 @@ def cmd_migrate(args, state, registry):
     _prune_old_backups(registry, dry=args.dry_run)
     if not args.dry_run:
         log("\nTo check it later from a normal terminal:")
-        log(f'  python "{SCRIPT}" verify --all')
+        log(f'  python "{SCRIPT}" verify "{migration.dst}"')
+        log("(verify --all checks every migration on this machine and scans all their transcripts: "
+            "it can take a long time.)")
 
 
 def _prune_old_backups(registry, dry):
@@ -383,7 +385,7 @@ def _parser():
 
     s = sub.add_parser("verify", help="checks (and repairs) the reassociation")
     s.add_argument("path", nargs="?", help="source or destination path of the migration")
-    s.add_argument("--all", action="store_true", help="all completed migrations")
+    s.add_argument("--all", action="store_true", help="all completed migrations (slow: scans the transcripts of every migrated project)")
 
     s = sub.add_parser("archive", help="retries renaming the original, or records the folder it was renamed to")
     s.add_argument("path", help="source or destination path of the migration")

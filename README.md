@@ -176,7 +176,8 @@ At the end of a migration the script prints its full path (it lives inside the i
 | Command | What it does |
 |---|---|
 | `python <script> status` | Lists migrations and flags archives older than 6 months |
-| `python <script> verify --all` | Checks every migration and repairs the session links if something reverted them (close the project's Claude Code sessions first) |
+| `python <script> verify <new path>` | Checks one migration and repairs its session links if something reverted them (close the project's Claude Code sessions first). This is the command printed at the end of a migration |
+| `python <script> verify --all` | The same for every migration on the machine. Slow: it scans the transcripts of every migrated project and can take many minutes |
 | `python <script> undo <new path>` | Moves the sessions back and restores the original's name (the copy is kept). For a case-only rename, renames the folder back |
 | `python <script> archive <new path>` | Retries renaming the original if it was in use (not for case-only renames) |
 | `python <script> relink <old path> <new path>` | Re-applies only the session reassociation |
@@ -232,7 +233,7 @@ the project settings or the VS Code tabs. cc-move moves the folder and everythin
   the Claude Code version it was tested with.
 - Moves between folders on the same machine only. Multi-root workspaces (`.code-workspace` files) are not handled.
 - Users have reported that an open session can rewrite `~/.claude.json` from memory when it closes. This was not
-  reproduced while testing, but `verify --all` repairs it if it happens.
+  reproduced while testing, but `verify <new path>` repairs it if it happens.
 
 ## Development
 

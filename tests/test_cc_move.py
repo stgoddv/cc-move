@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -375,6 +376,12 @@ class CaseRenameTest(FixtureTestCase):
     def rename(self):
         self.assertEqual(self.f.run("migrate", self.f.src, self.new), 0, self.f.output)
 
+    def test_suggests_verifying_the_renamed_folder(self):
+        self.rename()
+        printed = re.findall(r'verify "([^"]+)"', self.f.output)
+        self.assertEqual(len(printed), 1, self.f.output)
+        self.assertEqual(os.path.basename(printed[0]), "proj")  # the new case, not the old one
+
     def test_folder_and_sessions_get_the_new_case(self):
         f = self.f
         self.rename()
@@ -564,6 +571,12 @@ class MigrationTest(FixtureTestCase):
         super().setUp()
         self.assertEqual(self.f.run("migrate", self.f.src, self.f.dst), 0, self.f.output)
         self.archive = os.path.join(os.path.dirname(self.f.src), f"archive-{dt.date.today().isoformat()}-Proj")
+
+    def test_suggests_verifying_this_migration_not_all(self):
+        printed = re.findall(r'verify "([^"]+)"', self.f.output)
+        self.assertEqual(len(printed), 1, self.f.output)
+        self.assertTrue(paths.same_path(printed[0], self.f.dst), printed)
+        self.assertNotIn("verify --all\n", self.f.output)  # only mentioned as the slow alternative
 
     def test_small_repo_prints_no_progress_lines(self):
         self.assertNotIn("% |", self.f.output)  # finished well before the first 60 s interval
