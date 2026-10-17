@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 — 2026-10-17
+
+- Fix: after a migration the script printed `verify --all` as the way to check it, and the skill suggested running
+  it. `--all` checks every migration on the machine and scans all their transcripts, which can take many minutes.
+  The script now prints `verify "<destination>"` for the migration just done, and the skill tells the agent not to
+  run `--all` unless the user asks. `--all` is documented as slow.
+
 ## 0.4.0 — 2026-10-15
 
 Fixes and improvements found by migrating three real projects, two of them twice.
