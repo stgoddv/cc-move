@@ -2,7 +2,9 @@
 
 cc-move is a Claude Code plugin that moves or renames a project folder without losing its Claude Code
 sessions. Claude Code ties sessions to the folder by its path, so moving or renaming a folder by hand orphans them.
-The user-facing procedure lives in `plugin/skills/migrate/SKILL.md`; this file is for working on the code.
+It also clones a project: copies it to a new folder, keeping the original and everything Claude Code and VS Code
+keep about it untouched. The user-facing procedures live in `plugin/skills/migrate/SKILL.md` and
+`plugin/skills/clone/SKILL.md`; this file is for working on the code.
 
 ## Layout
 
@@ -10,10 +12,13 @@ The user-facing procedure lives in `plugin/skills/migrate/SKILL.md`; this file i
 .claude-plugin/marketplace.json        marketplace "cc-move" (source: ./plugin)
 plugin/.claude-plugin/plugin.json      plugin manifest (keep "version" in sync with CHANGELOG.md and git tags)
 plugin/skills/migrate/SKILL.md         /cc-move:migrate — the two-phase procedure the agent follows
-plugin/skills/migrate/scripts/         cc_move.py (entry point) and the ccmove package (phase 1)
-plugin/agents/auditor.md               read-only phase 2 auditor subagent
-plugin/hooks/                          hooks.json + confirm_changes.py (always ask before migrate/undo/archive/relink/prune);
-                                       guard_migration.py (the skill's no-commit/no-deploy hook)
+plugin/skills/migrate/scripts/         cc_move.py (entry point) and the ccmove package (phase 1), shared by both skills
+plugin/skills/clone/SKILL.md           /cc-move:clone — copy to a new folder, keep the original; phase 2 adds identity
+                                       questions (runs ../migrate/scripts/cc_move.py clone)
+plugin/agents/auditor.md               read-only phase 2 auditor subagent (moves and clones)
+plugin/hooks/                          hooks.json + confirm_changes.py (always ask before
+                                       migrate/clone/undo/archive/relink/recreate-links/prune);
+                                       guard_migration.py (both skills' no-commit/no-deploy hook)
 tests/test_cc_move.py                  end-to-end tests on a synthetic project, ~/.claude and %APPDATA%
 ```
 
@@ -47,14 +52,15 @@ tests/test_cc_move.py                  end-to-end tests on a synthetic project, 
 | `cli.py` | commands and arguments |
 | `migrate.py` | phase 1 step by step (`Migration` class) |
 | `rename.py` | case-only rename in place (`CaseRename`, a `Migration` without copy, archive or note) |
+| `clone.py` | copy to a new folder keeping the original (`Clone`, a `Migration` without session relink, editor state or archive; lists the git remotes for the user to remove in phase 2, without changing them) |
 | `copying.py` | scan, SHA-256 manifest, robocopy, links |
 | `progress.py` | time-based progress lines and `progress.txt` |
 | `claude_state.py` | session folders, `~/.claude.json`, history, reassociation, open sessions and windows |
 | `rewriter.py` | replaces the old path with the new one in every form |
 | `editor_state.py` | VS Code per-folder state (`workspaceStorage`): open Claude tabs and the rest |
-| `project_info.py` | git, venvs, lockfiles, old paths written inside the project, build outputs and caches |
-| `finalize.py` | archiving the original (and why a rename fails), the `CLAUDE.local.md` note |
-| `registry.py` / `report.py` | `migrations.jsonl` (chronological; `save` replaces in place; chains of moves) and the reports |
+| `project_info.py` | git (including a clone's remotes and the commands to remove them), venvs, lockfiles, old paths written inside the project, build outputs and caches |
+| `finalize.py` | archiving the original (and why a rename fails), the `CLAUDE.local.md` note (moved from / cloned from) |
+| `registry.py` / `report.py` | `migrations.jsonl` (chronological; `save` replaces in place; chains of moves; a `kind: "clone"` record matches only by its `dst` and is never part of a chain) and the reports |
 | `backups.py` | zip backups of Claude Code's state, 30-day expiry, `prune` (also of pre-0.3 folder backups) |
 | `paths.py` | Windows path utilities |
 

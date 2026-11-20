@@ -4,12 +4,13 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A [Claude Code](https://claude.com/claude-code) plugin that moves or renames a project folder **without losing its
-Claude Code sessions**. Windows only.
+Claude Code sessions**, or copies it to a new folder while leaving the original untouched. Windows only.
 
 ```
 /cc-move:migrate C:\Users\me\OneDrive\Desktop\my-app C:\Users\me\code\my-app     move it
 /cc-move:migrate C:\Users\me\code\my-app C:\Users\me\code\shop-app               rename it
 /cc-move:migrate C:\Users\me\code\MyApp C:\Users\me\code\myapp                   change only the case
+/cc-move:clone C:\Users\me\code\shop-app C:\Users\me\code\bakery-app             copy it, keep the original
 ```
 
 ## Why
@@ -57,7 +58,8 @@ claude plugin marketplace add stgoddv/cc-move
 claude plugin install cc-move@cc-move
 ```
 
-Restart Claude Code (or open a new session). Type `/cc-move` and the `/cc-move:migrate` command should appear.
+Restart Claude Code (or open a new session). Type `/cc-move` and the `/cc-move:migrate` and `/cc-move:clone`
+commands should appear.
 
 ## Move or rename a project
 
@@ -87,7 +89,8 @@ Say you want to move `C:\Users\me\OneDrive\Desktop\my-app` to `C:\Users\me\code\
    touching anything, and asks you to confirm.
 5. **Confirm.** Claude runs the migration and then audits and repairs the moved project. Claude Code asks your
    permission for the migration command in every permission mode, auto mode included: a plugin hook requires it for
-   every cc-move command that changes something (`migrate`, `undo`, `archive`, `relink`). At the end it gives you a summary: what moved, what was recreated, what to check.
+   every cc-move command that changes something (`migrate`, `clone`, `undo`, `archive`, `relink`,
+   `recreate-links`). At the end it gives you a summary: what moved, what was recreated, what to check.
 6. **Open the new folder in VS Code** with *File > Open Folder* (not *Open Recent*, which still has the old path).
    The Claude tabs you had open reappear and the session history is complete.
    VS Code asks whether you trust the folder; trusting the parent folder (`C:\Users\me\code`) once avoids the
@@ -125,6 +128,50 @@ under the old name, with the old state, and show the old case in the title.
 
 Give Claude the list in one session (`/cc-move:migrate` and then the pairs of paths, one project per line). It
 moves or renames them one at a time and stops at the first failure.
+
+## Copy a project (clone)
+
+To start a new project from an existing one (say a shop for a new client that is 90% the same as `shop-app`) while
+`shop-app` keeps working exactly as it is:
+
+```
+/cc-move:clone C:\Users\me\code\shop-app C:\Users\me\code\bakery-app
+```
+
+Or in your own words: *"use cc-move to copy shop-app to bakery-app, keeping the original"*. The original does not
+need to be closed, but run the command from a Claude Code session outside both folders if you can.
+
+What it does:
+
+- copies the folder with robocopy and **verifies every file by SHA-256** (dependencies are skipped and reinstalled
+  in phase 2, as in a move; `--with-deps` copies them);
+- **lists the copy's git remotes** in the report, with the commands to remove them. It does not change them: the
+  copy keeps the history and, until you remove them, the original's remotes, so a push from the copy would still
+  reach the original's repository. If the project is a git worktree or submodule (`.git` is a file), the copy shares
+  the original's repository: cc-move warns you and gives no commands;
+- writes a "Cloned from" note in the copy's `CLAUDE.local.md` (hidden from git), so a future agent knows where it
+  came from.
+
+What it never touches: the original folder, its Claude Code sessions, `~/.claude.json`, the prompt history and its
+VS Code state. The copy starts with **no Claude Code sessions**, and there is no archive and no backup.
+
+Then Claude audits the copy, recreates the dependencies and first fixes old absolute paths in local config, which
+now point **into the original** (a script using them would change it). It then shows you the git remotes and the
+exact commands to detach them (`git -C "<copy>" remote remove origin`, optionally `git remote add origin <new URL>`):
+**you run them**, in your terminal or in Claude Code with the `!` prefix, and Claude checks the result with
+`git remote -v`. Finally it lists what still ties the copy to the original and **asks you item by item** before
+changing anything:
+
+- `.env*` values and secrets (database URLs, API keys, accounts that belong to the original or its client);
+- deploy and infrastructure config (stack, service and bucket names, domains, cloud accounts): deploying the copy
+  unchanged could overwrite the original's resources;
+- CI workflows;
+- package and app names and ids (`package.json`, `pyproject.toml`, bundle and application ids);
+- mentions of the project in `CLAUDE.md` and `README`.
+
+It applies only what you approve, never commits, pushes or deploys, and never changes the original. Open the copy in
+a new VS Code window with *File > Open Folder*. To discard a clone, delete its folder: `undo`, `verify`, `archive`
+and `relink` do not apply to clones.
 
 ## What happens, step by step
 
@@ -175,15 +222,20 @@ At the end of a migration the script prints its full path (it lives inside the i
 
 | Command | What it does |
 |---|---|
-| `python <script> status` | Lists migrations and flags archives older than 6 months |
+| `python <script> status` | Lists migrations and clones (`clone of <source>`) and flags archives older than 6 months |
+| `python <script> clone <source> <new path> [--dry-run] [--with-deps]` | Phase 1 of a clone: copies and verifies, lists the git remotes to remove (it does not remove them), writes the note. Never touches the original |
 | `python <script> verify <new path>` | Checks one migration and repairs its session links if something reverted them (close the project's Claude Code sessions first). This is the command printed at the end of a migration |
 | `python <script> verify --all` | The same for every migration on the machine. Slow: it scans the transcripts of every migrated project and can take many minutes |
 | `python <script> undo <new path>` | Moves the sessions back and restores the original's name (the copy is kept). For a case-only rename, renames the folder back |
 | `python <script> archive <new path>` | Retries renaming the original if it was in use (not for case-only renames) |
 | `python <script> relink <old path> <new path>` | Re-applies only the session reassociation |
+| `python <script> recreate-links <new path>` | Creates the links phase 1 left pending once their targets exist (after reinstalling dependencies) |
 | `python <script> prune [--older-than DAYS] [--dry-run]` | Deletes expired backups now (see below) |
 
-Reports, the migration registry and progress files live in `%LOCALAPPDATA%\cc-move` (each migration has a
+`verify`, `undo`, `archive` and `relink` refuse a clone: it has no sessions to relink and no archive. To discard a
+clone, delete its folder; the original was never changed.
+
+Reports, the migration registry and progress files live in `%LOCALAPPDATA%\cc-move` (each migration or clone has a
 `report.md`), so they survive plugin updates and uninstalls.
 
 ### Backups
@@ -210,6 +262,7 @@ To restore a backup by hand, close every Claude Code session and extract the zip
 | `The folder is already named ...` | A case-only rename where nothing changes in the project folder's own name: either it already has that name, or only a parent folder's case differs (not supported). |
 | `Could not rename ...` (archiving) | Something still uses the original folder (a terminal, an editor, an antivirus scan). Close it and run `archive`. |
 | `The copy does NOT match the source` | Nothing in Claude Code was changed. Look at `manifest-diff.txt` in the report folder; often a file changed during the copy. Try again with the project closed. |
+| `... is a clone of ...` (from `verify`, `undo`, `archive` or `relink`) | Those commands are for moves. To discard a clone, delete its folder; the original was never changed. |
 | `cc-move only works on Windows` / `needs Python 3.8` | See the requirements. If `python` is not found but `py` is, Claude uses `py -3`. |
 
 ## Update and uninstall
@@ -231,7 +284,8 @@ the project settings or the VS Code tabs. cc-move moves the folder and everythin
 
 - Claude Code's and VS Code's storage formats are internal and undocumented; they may change. Each release states
   the Claude Code version it was tested with.
-- Moves between folders on the same machine only. Multi-root workspaces (`.code-workspace` files) are not handled.
+- Moves and copies between folders on the same machine only. Multi-root workspaces (`.code-workspace` files) are
+  not handled.
 - Users have reported that an open session can rewrite `~/.claude.json` from memory when it closes. This was not
   reproduced while testing, but `verify <new path>` repairs it if it happens.
 

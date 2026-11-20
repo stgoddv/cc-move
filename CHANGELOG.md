@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.0 — 2026-11-20
+
+- New `/cc-move:clone` skill and `clone <source> <destination> [--dry-run] [--with-deps]` command: copies a project
+  to a new folder (another name and/or location) and keeps the original working, for example to start a similar
+  project for another client. The copy is verified by SHA-256 like a move. The original is never touched: not its
+  folder, its Claude Code sessions, `~/.claude.json`, the prompt history or its VS Code state, and it does not need
+  to be closed. The copy starts with no Claude Code sessions.
+- A clone does not change the copy's git remotes: the copy keeps the history and the original's remotes. The report
+  lists them under "For phase 2" with the exact commands to remove them (`git -C "<copy>" remote remove origin`) and
+  warns that until then a push from the copy reaches the original's repository; the dry run lists them as remotes to
+  remove in phase 2. The user runs those commands (in a terminal or with Claude Code's `!` prefix), not the agent,
+  which then checks them with `git remote -v`. If `.git` is a file (worktree or submodule), the report warns that
+  the copy shares the original's repository and gives no commands. The copy's `CLAUDE.local.md` gets a
+  "Cloned from" note instead of the original's cc-move note.
+- The report of a clone warns that old paths found in the copy point into the original, which is still in use.
+  Phase 2 fixes them first, then the agent lists what still ties the copy to the original (`.env*` and secrets,
+  deploy and infrastructure names, CI, package and app names, mentions in `CLAUDE.md` and `README`) and asks the
+  user item by item, applying only what they approve.
+- The auditor handles moves and clones; for a clone it reports a "Ties to the original" category first.
+- Clones are recorded in the registry with kind `clone`. `status` lists them as `clone of <source>`; `phase2` and
+  `recreate-links` work on them; `verify`, `undo`, `archive` and `relink` refuse them (to discard a clone, delete its
+  folder). A clone is never part of a chain of moves, so moving the original or the copy later works as before.
+- `/cc-move:migrate`'s description points to `/cc-move:clone` for copies, so asking to copy a project no longer
+  triggers a move. Like the other commands that change things, `clone` asks for permission unless it is a dry run.
+- Remote urls in the report and the dry run hide any user, password or token (`https://***@host/...`).
+- Recording a venv's packages (clone and migrate) runs its Python with `-B`, so it no longer writes `__pycache__`
+  into the source, and without pip's version check.
+
 ## 0.4.1 — 2026-10-17
 
 - Fix: after a migration the script printed `verify --all` as the way to check it, and the skill suggested running

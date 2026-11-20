@@ -1,6 +1,6 @@
 ---
 name: migrate
-description: Move or rename a project folder without losing its Claude Code sessions, settings and open VS Code tabs. Copies and verifies by hash, relinks the sessions, archives the original, then audits and repairs what the copy cannot carry over. Use when the user asks to move, rename, migrate or relocate a project folder, or to change the case of its name (or to use cc-move). Windows only.
+description: Move or rename a project folder without losing its Claude Code sessions, settings and open VS Code tabs. Copies and verifies by hash, relinks the sessions, archives the original, then audits and repairs what the copy cannot carry over. Use when the user asks to move, rename, migrate or relocate a project folder, or to change the case of its name (or to use cc-move). To copy a project and keep the original in use, use /cc-move:clone instead. Windows only.
 argument-hint: "<source> <destination> [--with-deps]"
 allowed-tools: Bash(python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py migrate --dry-run *) Bash(python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py verify *) Bash(python ${CLAUDE_SKILL_DIR}/scripts/cc_move.py status)
 hooks:
@@ -28,6 +28,8 @@ The migration has two phases:
   and the prompt history, copies the VS Code state of the folder (open Claude tabs) to the new path, renames the
   original to `archive-<date>-<name>` and writes a note in the project's `CLAUDE.local.md`.
 - **Phase 2 — you (judgment).** Audit what the copy could not carry over and repair it, without commits or deploys.
+
+To copy a project and keep the original working, use `/cc-move:clone` instead.
 
 ## Before you start
 

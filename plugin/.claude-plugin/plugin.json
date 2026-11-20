@@ -1,7 +1,7 @@
 {
   "name": "cc-move",
-  "version": "0.4.1",
-  "description": "Move or rename a project folder and bring its Claude Code sessions, settings and VS Code tabs along. Windows only.",
+  "version": "0.5.0",
+  "description": "Move or rename a project folder and bring its Claude Code sessions, settings and VS Code tabs along, or copy it to a new folder and keep the original untouched. Windows only.",
   "author": {
     "name": "stgoddv",
     "url": "https://github.com/stgoddv"
@@ -9,5 +9,5 @@
   "homepage": "https://github.com/stgoddv/cc-move",
   "repository": "https://github.com/stgoddv/cc-move",
   "license": "MIT",
-  "keywords": ["sessions", "migration", "move", "rename", "windows", "vscode"]
+  "keywords": ["sessions", "migration", "move", "rename", "clone", "copy", "windows", "vscode"]
 }
