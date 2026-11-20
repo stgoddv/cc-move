@@ -47,6 +47,51 @@ def git_info(path):
     }
 
 
+SHARED_REPO_WARNING = (
+    "`.git` is a file (worktree or submodule): the copy SHARES the git repository of the original, so its commits, "
+    "branches and remotes are the original's. Nothing was changed in git. Decide in phase 2, with the user, how the "
+    "copy gets its own repository before committing anything from it.")
+# Variables that would make git work on another repository than the one given with -C (e.g. the original's).
+GIT_REPO_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")
+
+
+def list_remotes(project):
+    """Remotes of a git repo read with `git remote -v`: [{"name", "url", "push_url" (only if it differs)}].
+    Read-only. Returns (remotes, error); ([], None) if `project` has no .git folder."""
+    if not os.path.isdir(os.path.join(project, ".git")):
+        return [], None
+    env = {k: v for k, v in os.environ.items() if k.upper() not in GIT_REPO_VARIABLES}
+    try:
+        r = subprocess.run(["git", "--no-optional-locks", "-C", project, "remote", "-v"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=120, env=env)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return [], f"could not run git remote -v: {e}"
+    if r.returncode != 0:
+        return [], f"git remote -v failed: {r.stderr.strip()}"
+    remotes = {}
+    for line in r.stdout.splitlines():
+        m = re.match(r"^(\S+)\s+(.*?)\s+\((fetch|push)\)$", line)
+        if m:
+            name, url, kind = m.groups()
+            remotes.setdefault(name, {"name": name})["url" if kind == "fetch" else "push_url"] = hide_credentials(url)
+    for remote in remotes.values():
+        remote.setdefault("url", remote.get("push_url"))
+        if remote.get("push_url") == remote["url"]:
+            del remote["push_url"]
+    return list(remotes.values()), None
+
+
+def hide_credentials(url):
+    """The url with any user and password or token replaced by ***, so they never reach the report or the screen
+    (`https://user:token@host/x` -> `https://***@host/x`). Scp-like `git@host:x` has no secret and is kept."""
+    return re.sub(r"^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@]+@", r"\1***@", url)
+
+
+def remove_remote_command(project, name):
+    """The command the user runs to remove a remote from `project` (cc-move never runs it)."""
+    return f'git -C "{project}" remote remove {name}'
+
+
 def lockfiles(tree):
     """Relative paths of copied lockfiles and dependency manifests."""
     return sorted(rel for rel, _, _ in tree.files if rel.rsplit("/", 1)[-1] in LOCKFILES)
@@ -88,12 +133,14 @@ def _read_pyvenv_cfg(venv):
 
 
 def _pip_freeze(venv):
-    """(pip freeze output, method) using the venv's Python, or (None, None) if it does not work."""
+    """(pip freeze output, method) using the venv's Python, or (None, None) if it does not work.
+    `-B` keeps Python from writing __pycache__ into the venv: the source must stay byte-identical."""
     python = os.path.join(venv, "Scripts", "python.exe")
     if not os.path.isfile(python):
         return None, None
     try:
-        r = subprocess.run([python, "-m", "pip", "freeze"], capture_output=True, text=True,
+        r = subprocess.run([python, "-B", "-m", "pip", "freeze", "--disable-pip-version-check"], capture_output=True,
+                           text=True,
                            encoding="utf-8", errors="replace", timeout=300)
     except (OSError, subprocess.TimeoutExpired):
         return None, None

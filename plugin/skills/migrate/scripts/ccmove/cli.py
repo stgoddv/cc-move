@@ -10,13 +10,14 @@ import sys
 from . import Abort, backups, log
 from .claude_state import ClaudeState, count_transcripts, link_problems, relink, transcript_mentions
 from .copying import create_link
+from .clone import Clone
 from .finalize import (archive_original, archive_path, existing_archives, is_real_folder, rename_folder,
                        rename_hint, update_note_archive)
 from .migrate import Migration
 from .paths import disk_case, full, is_under, long_path, same_path
 from .rename import CaseRename, is_case_rename
 from .progress import DEFAULT_INTERVAL
-from .registry import Registry, source_is_copy
+from .registry import Registry, is_clone, source_is_copy
 
 SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cc_move.py")
 
@@ -46,18 +47,35 @@ def main(argv=None):
 def cmd_migrate(args, state, registry):
     """Full phase 1 (or only the preview with --dry-run); a case-only rename is done in place."""
     kind = CaseRename if is_case_rename(args.src, args.dst) else Migration
-    migration = kind(state, registry, args.state_dir, args.src, args.dst,
-                     with_deps=args.with_deps, progress_every=args.progress_every)
-    if args.dry_run:
-        migration.preview()
-    else:
-        migration.run()
+    migration = _phase1(kind, args, state, registry)
     _prune_old_backups(registry, dry=args.dry_run)
     if not args.dry_run:
         log("\nTo check it later from a normal terminal:")
         log(f'  python "{SCRIPT}" verify "{migration.dst}"')
         log("(verify --all checks every migration on this machine and scans all their transcripts: "
             "it can take a long time.)")
+
+
+def cmd_clone(args, state, registry):
+    """Phase 1 of a clone (or only the preview with --dry-run): the original and its sessions are not touched."""
+    clone = _phase1(Clone, args, state, registry)
+    if not args.dry_run:
+        log("\nNext: phase 2 audits the copy and cuts what still ties it to the original.")
+        remotes = clone.record.get("remotes") or []
+        if remotes:
+            log(f"The copy still has {len(remotes)} git remote(s) pointing to the original's repository; "
+                "phase 2 gives the commands to remove them.")
+
+
+def _phase1(kind, args, state, registry):
+    """Builds the phase 1 of `kind` from the arguments and runs it, or only its preview with --dry-run."""
+    migration = kind(state, registry, args.state_dir, args.src, args.dst,
+                     with_deps=args.with_deps, progress_every=args.progress_every)
+    if args.dry_run:
+        migration.preview()
+    else:
+        migration.run()
+    return migration
 
 
 def _prune_old_backups(registry, dry):
@@ -85,6 +103,10 @@ def cmd_prune(args, state, registry):
 def cmd_relink(args, state, registry):
     """Re-applies the session reassociation from `src` to `dst`."""
     src, dst = full(args.src), full(args.dst)
+    if any(_is_clone(r) and r["phase1"] != "undone" and same_path(r["src"], src) and same_path(r["dst"], dst)
+           for r in registry.all()):
+        raise Abort(f"{dst} is a clone of {src}: the original keeps its sessions and the clone starts without any. "
+                    "Relinking would take them away from the original.")
     state.ensure_closed(src, dst)
     log(json.dumps(relink(state, src, dst), indent=2, ensure_ascii=False))
     return _report_problems(link_problems(state, src, dst))
@@ -93,9 +115,11 @@ def cmd_relink(args, state, registry):
 def cmd_verify(args, state, registry):
     """Checks a migration (or all with --all) and repairs the reassociation if needed."""
     if args.all:
-        records = [r for r in registry.all() if r["phase1"].startswith("ok")]
+        records = [r for r in registry.all() if r["phase1"].startswith("ok") and not _is_clone(r)]
     elif args.path:
         records = [registry.find(args.path)]
+        if _is_clone(records[0]):
+            raise Abort(f"{records[0]['dst']} is a clone of {records[0]['src']}: it has no sessions to verify.")
     else:
         raise Abort("Give the path of a migration or use --all.")
     if not records:
@@ -181,6 +205,9 @@ def cmd_archive(args, state, registry):
     record = registry.find(args.path)
     if _is_case_rename(record):
         raise Abort("A case-only rename keeps the folder in place: there is nothing to archive.")
+    if _is_clone(record):
+        raise Abort(f"{record['dst']} is a clone of {record['src']}: the original is still in use and is never "
+                    "archived.")
     if record.get("archive") and os.path.isdir(record["archive"]) and not args.folder:
         log(f"Already archived: {record['archive']}")
         return
@@ -260,6 +287,9 @@ def cmd_recreate_links(args, state, registry):
 def cmd_undo(args, state, registry):
     """Returns the original to its name and the sessions to the old path. Does not delete the copy."""
     record = registry.find(args.path)
+    if _is_clone(record):
+        raise Abort(f"{record['dst']} is a clone of {record['src']}: there is nothing to undo. To discard a clone, "
+                    "delete its folder; the original was never changed.")
     if _is_case_rename(record):
         return _undo_case_rename(state, registry, record)
     src, dst = record["src"], record["dst"]
@@ -308,6 +338,11 @@ def _is_case_rename(record):
     return record.get("kind") == "case-rename"
 
 
+def _is_clone(record):
+    """True if the registry record is a clone: the original and its sessions stayed in place."""
+    return is_clone(record)
+
+
 def cmd_phase2(args, state, registry):
     """Records the phase 2 result in the registry."""
     record = registry.find(args.path)
@@ -328,14 +363,19 @@ def cmd_status(args, state, registry):
         archived = bool(r.get("archive")) and os.path.isdir(r["archive"])
         if _is_case_rename(r):
             archive_text = "n/a (rename)"
+        elif _is_clone(r):
+            archive_text = "n/a (clone)"
         elif archived:
             archive_text = "yes"
         elif r.get("archive") and source_is_copy(registry.chain(r)):
             archive_text = "deleted copy"  # the archive of an intermediate copy: the true original is further back
         else:
             archive_text = "no"
-        line = (f"{r['date']}  {os.path.basename(r['src']):24} phase1={r['phase1']:10} "
+        name = os.path.basename(r["dst"] if _is_clone(r) else r["src"])
+        line = (f"{r['date']}  {name:24} phase1={r['phase1']:10} "
                 f"phase2={r['phase2']:8} archived={archive_text:12} backup={_backup_text(r)}")
+        if _is_clone(r):
+            line += f"  clone of {r['src']}"
         later = registry.next_move(r)
         if later:
             line += f"  -> moved on: {later['id']}"
@@ -364,20 +404,23 @@ def _report_problems(problems):
 
 def _parser():
     """Defines the commands and their arguments."""
-    p = argparse.ArgumentParser(prog="cc_move.py", description="Moves a repo without losing its Claude Code sessions.")
+    p = argparse.ArgumentParser(prog="cc_move.py",
+                                description="Moves (or clones) a repo without losing its Claude Code sessions.")
     p.add_argument("--claude-home", default=os.path.expanduser("~"),
                    help="folder that contains .claude and .claude.json (for tests)")
     p.add_argument("--state-dir", default=default_state_dir(), help="where to store reports/ and migrations.jsonl")
     sub = p.add_subparsers(dest="command", required=True)
 
-    s = sub.add_parser("migrate", help="full phase 1")
-    s.add_argument("src")
-    s.add_argument("dst")
-    s.add_argument("--dry-run", action="store_true", help="shows what it would do without changing anything")
-    s.add_argument("--with-deps", action="store_true",
-                   help="also copies node_modules and virtual environments (by default they are recreated in phase 2)")
-    s.add_argument("--progress-every", type=float, default=DEFAULT_INTERVAL, metavar="SECONDS",
-                   help=f"at most one progress line per this many seconds (default {DEFAULT_INTERVAL})")
+    for name, help_text in (("migrate", "full phase 1"),
+                            ("clone", "phase 1 of a copy that leaves the original and its sessions untouched")):
+        s = sub.add_parser(name, help=help_text)
+        s.add_argument("src")
+        s.add_argument("dst")
+        s.add_argument("--dry-run", action="store_true", help="shows what it would do without changing anything")
+        s.add_argument("--with-deps", action="store_true", help="also copies node_modules and virtual environments "
+                       "(by default they are recreated in phase 2)")
+        s.add_argument("--progress-every", type=float, default=DEFAULT_INTERVAL, metavar="SECONDS",
+                       help=f"at most one progress line per this many seconds (default {DEFAULT_INTERVAL})")
 
     s = sub.add_parser("relink", help="re-applies the session reassociation (idempotent)")
     s.add_argument("src")
@@ -413,6 +456,7 @@ def _parser():
 
 COMMANDS = {
     "migrate": cmd_migrate,
+    "clone": cmd_clone,
     "relink": cmd_relink,
     "verify": cmd_verify,
     "archive": cmd_archive,

@@ -1,4 +1,5 @@
-"""PreToolUse hook registered by /cc-move:migrate: no commits, pushes or deploys for the rest of that session.
+"""PreToolUse hook registered by the cc-move skills (migrate, clone): no commits, pushes or deploys for the rest
+of that session.
 
 The checks used to be `if` rules such as `Bash(git push *)` with a hook that always blocked. Claude Code runs a hook
 anyway when the command contains a $VARIABLE, $(...) or backticks, so harmless commands like
@@ -11,9 +12,9 @@ import sys
 
 ARG = r"(?:\"[^\"]*\"|'[^']*'|\S+)"
 GIT = r"git(?:\.exe)?\s+(?:-[Cc]\s+" + ARG + r"\s+|--?[\w-]+(?:=" + ARG + r")?\s+)*"
-NO_COMMITS = "no commits in a session that used /cc-move:migrate. Open a new session to commit."
-NO_PUSHES = "no pushes in a session that used /cc-move:migrate. Open a new session to push."
-NO_DEPLOYS = "no deploys in a session that used /cc-move:migrate."
+NO_COMMITS = "no commits in a session that used cc-move. Open a new session to commit."
+NO_PUSHES = "no pushes in a session that used cc-move. Open a new session to push."
+NO_DEPLOYS = "no deploys in a session that used cc-move."
 RULES = [
     (GIT + r"commit\b", NO_COMMITS),
     (GIT + r"push\b", NO_PUSHES),
@@ -30,7 +31,7 @@ ENV_PREFIX = re.compile(r"^(?:\w+=" + ARG + r"\s+)*")
 
 
 def blocked_reason(command):
-    """Why `command` must not run during a migration (None if it may)."""
+    """Why `command` must not run in a session that used cc-move (None if it may)."""
     for part in SEPARATORS.split(command):
         words = ENV_PREFIX.sub("", part.strip())
         for pattern, reason in RULES:

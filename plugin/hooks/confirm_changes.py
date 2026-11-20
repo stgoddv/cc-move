@@ -7,10 +7,11 @@ import json
 import re
 import sys
 
-CHANGING_COMMANDS = ("migrate", "undo", "archive", "relink", "recreate-links", "prune")
-PREVIEWABLE = ("migrate", "prune")  # with --dry-run they change nothing
+CHANGING_COMMANDS = ("migrate", "clone", "undo", "archive", "relink", "recreate-links", "prune")
+PREVIEWABLE = ("migrate", "clone", "prune")  # with --dry-run they change nothing
 COMMAND_WORD = re.compile(r"(?<![\w\\/.-])(" + "|".join(CHANGING_COMMANDS) + r")(?![\w\\/.-])")
-REASON = "cc-move: this command moves folders or changes Claude Code's state, so it always needs your approval."
+REASON = ("cc-move: this command moves or copies folders, or changes Claude Code's state, "
+          "so it always needs your approval.")
 
 
 def needs_approval(command):

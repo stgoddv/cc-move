@@ -3,6 +3,13 @@
 import json
 import os
 
+from .project_info import remove_remote_command
+from .registry import is_clone
+
+ORIGINAL_PATHS_WARNING = (
+    "**WARNING: the old paths below point INTO THE ORIGINAL, which is still in place and in use. A script, config "
+    "or tool run from the copy with them would read or modify the original. Fix them first.**")
+
 
 def write_report(report_dir, record, details):
     """Saves report.json and report.md in the report folder."""
@@ -10,6 +17,8 @@ def write_report(report_dir, record, details):
         json.dump(details, f, indent=2, ensure_ascii=False)
     if record.get("kind") == "case-rename":  # in place: nothing to review in phase 2
         sections = [_summary(record, details), _editor_state(details), _warnings(details)]
+    elif is_clone(record):
+        sections = _clone_sections(record, details)
     else:
         sections = _migration_sections(record, details)
     with open(os.path.join(report_dir, "report.md"), "w", encoding="utf-8", newline="\n") as f:
@@ -32,14 +41,39 @@ def _migration_sections(record, details):
     ]
 
 
+def _clone_sections(record, details):
+    """Sections of the report of a clone: what phase 2 must review, starting with what still ties it to the
+    original."""
+    return [
+        _summary(record, details),
+        ["", "## For phase 2"],
+        _remotes(record, details),
+        ["", ORIGINAL_PATHS_WARNING] if details.get("stale_refs") else [],
+        _stale_refs(details),
+        _dependencies(details),
+        _lockfiles(details),
+        _links(details),
+        _git(details, "### Git (of the original, before cloning)"),
+        _warnings(details),
+        ["", "## Phase 2 (filled in by the agent)", ""],
+    ]
+
+
 def _summary(record, details):
     """Header: paths, status, hash and moved sessions."""
+    if record.get("kind") == "case-rename":
+        what = "- Case-only rename in place: nothing was copied or archived"
+    elif is_clone(record):
+        what = ("- Clone: the original was not touched (not archived, no sessions moved); "
+                "the copy starts without Claude Code sessions")
+    else:
+        what = (f"- Archived original: `{record.get('archive') or '(pending)'}` — "
+                f"delete from {record.get('delete_after')}")
     lines = [
         f"# cc-move: {os.path.basename(record['src'])} ({record['date']})", "",
         f"- Source: `{record['src']}`",
         f"- Destination: `{record['dst']}`",
-        f"- Archived original: `{record.get('archive') or '(pending)'}` — delete from {record['delete_after']}"
-        if record.get("kind") != "case-rename" else "- Case-only rename in place: nothing was copied or archived",
+        what,
         f"- Phase 1 status: **{record['phase1']}**" + (f" — {record['error']}" if record.get("error") else ""),
     ]
     if record.get("content_sha256"):
@@ -128,10 +162,26 @@ def _stale_refs(details):
     return lines
 
 
-def _git(details):
+def _remotes(record, details):
+    """The copy's git remotes, which still point to the original's repository, and the commands to remove them.
+    cc-move does not run them: the user does."""
+    remotes = details.get("remotes") or []
+    lines = ["", "### Git remotes of the copy (still the original's)"]
+    if not remotes:
+        return lines + ["- (none)"]
+    lines.append("- WARNING: until they are removed, a push from the copy reaches the original's repository.")
+    for r in remotes:
+        push = f", push `{r['push_url']}`" if r.get("push_url") else ""
+        lines.append(f"- `{r['name']}`: `{r['url']}`{push}")
+    lines += ["", "Commands for the user to run (cc-move does not run them):", "", "```"]
+    lines += [remove_remote_command(record["dst"], r["name"]) for r in remotes]
+    return lines + ["```"]
+
+
+def _git(details, title="### Git (before migrating)"):
     """Git state before migrating, to compare it afterwards."""
     git = details.get("git")
-    lines = ["", "### Git (before migrating)"]
+    lines = ["", title]
     if not git:
         return lines + ["- not a git repo"]
     status = git["status"].splitlines() if git["status"] and not git["status"].startswith("(error") else []

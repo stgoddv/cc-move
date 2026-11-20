@@ -185,18 +185,40 @@ def _deps_line(record):
     return f"{listed} were not copied: they were recreated afterwards (below){in_builds}."
 
 
-def write_note(project, record, chain=()):
-    """Writes the note; if CLAUDE.local.md already exists, appends the section at the end or replaces it.
-    A section already there belongs to an earlier move (the copy brought it along): it is kept inside the new one."""
+def clone_note_text(record):
+    """Section of CLAUDE.local.md that tells a future agent this folder is a clone and the original is still in use."""
+    deps = _deps_line(record)
+    return "\n".join([
+        NOTE_START,
+        f"## Cloned project ({record['date']})",
+        f"Cloned from `{record['src']}` on {record['date']} with cc-move. The original is still in place and in use: "
+        "never edit it from here.",
+        *([deps] if deps else []),
+        "- Recreated: (pending, phase 2)",
+        "- Pending / unresolved: (pending, phase 2)",
+        NOTE_END,
+    ])
+
+
+def write_note(project, record, chain=(), keep_earlier=True):
+    """Writes the note (the clone note for a clone); if CLAUDE.local.md already exists, appends the section at the
+    end or replaces it. A section already there belongs to an earlier move (the copy brought it along): it is kept
+    inside the new one, unless `keep_earlier` is False (in a clone it describes the original's history, not this
+    folder's)."""
+
+    def section(earlier=None):
+        """The new section, with the earlier one nested if there is one to keep."""
+        return clone_note_text(record) if record.get("kind") == "clone" else note_text(record, chain, earlier)
+
     content = _read_note_file(project)
     if content is None:
-        content = note_text(record, chain) + "\n"
+        content = section() + "\n"
     elif _section_bounds(content):
         start, end = _section_bounds(content)
-        earlier = _demoted(content[start + len(NOTE_START):end - len(NOTE_END)].strip("\n"))
-        content = content[:start] + note_text(record, chain, earlier) + content[end:]
+        earlier = _demoted(content[start + len(NOTE_START):end - len(NOTE_END)].strip("\n")) if keep_earlier else None
+        content = content[:start] + section(earlier) + content[end:]
     else:
-        content = content.rstrip("\n") + "\n\n" + note_text(record, chain) + "\n"
+        content = content.rstrip("\n") + "\n\n" + section() + "\n"
     _write_note_file(project, content)
 
 

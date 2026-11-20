@@ -26,7 +26,7 @@ import _winapi
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "plugin", "skills", "migrate", "scripts"))
-from ccmove import cli, copying, editor_state, finalize, paths, progress, rewriter  # noqa: E402
+from ccmove import cli, copying, editor_state, finalize, paths, progress, project_info, rewriter  # noqa: E402
 from ccmove.registry import Registry  # noqa: E402
 
 UUID = "11111111-2222-3333-4444-555555555555"
@@ -795,6 +795,245 @@ class ChainTest(FixtureTestCase):
         self.assertIn("intermediate copy was deleted", f.output)
 
 
+ORIGIN = "https://example.com/acme/proj.git"
+UPSTREAM, UPSTREAM_PUSH = "https://example.com/up/proj.git", "git@example.com:up/proj.git"
+INHERITED_NOTE = ("# Mine\nkeep this\n\n" + finalize.NOTE_START + "\n## Folder migration (2026-01-01)\n"
+                  "This project was moved from `C:\\old\\Proj` with cc-move.\n" + finalize.NOTE_END + "\n")
+
+
+class HideCredentialsTest(unittest.TestCase):
+    """Remote urls never show a user, password or token."""
+
+    def test_userinfo_is_hidden_and_the_rest_kept(self):
+        hide = project_info.hide_credentials
+        self.assertEqual(hide("https://juan:ghp_abc123@github.com/acme/proj.git"), "https://***@github.com/acme/proj.git")
+        self.assertEqual(hide("https://ghp_abc123@github.com/acme/proj.git"), "https://***@github.com/acme/proj.git")
+        self.assertEqual(hide(ORIGIN), ORIGIN)
+        self.assertEqual(hide(UPSTREAM_PUSH), UPSTREAM_PUSH)
+
+
+def tree_digest(root):
+    """Every folder, link and file (with its SHA-256) under `root`, to prove that nothing in it changed."""
+    tree = copying.scan(root, with_deps=True)
+    files = {}
+    for rel, path, _ in tree.files:
+        with open(path, "rb") as fh:
+            files[rel] = hashlib.sha256(fh.read()).hexdigest()
+    return {"dirs": sorted(tree.dirs), "links": sorted(link[:3] for link in tree.links), "files": files}
+
+
+def git_out(*args):
+    """Output of a git command (run only inside the test's temporary folder)."""
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
+
+
+def add_remotes(project):
+    """Gives the fixture repo an origin and an upstream with a different push url."""
+    git_out("-C", project, "remote", "add", "origin", ORIGIN)
+    git_out("-C", project, "remote", "add", "upstream", UPSTREAM)
+    git_out("-C", project, "remote", "set-url", "--push", "upstream", UPSTREAM_PUSH)
+
+
+class CloneTestCase(FixtureTestCase):
+    """A fixture whose original has remotes and an inherited cc-move note, with snapshots of everything a clone
+    must not touch."""
+
+    def setUp(self):
+        super().setUp()
+        f = self.f
+        add_remotes(f.src)
+        write(os.path.join(f.src, "CLAUDE.local.md"), INHERITED_NOTE)
+
+    def snapshot(self):
+        """The original, the fake home (~/.claude, ~/.claude.json) and the fake VS Code state."""
+        return {root: tree_digest(root) for root in (self.f.src, self.f.home, self.f.appdata)}
+
+    def assertUntouched(self, before):
+        """Nothing of the original, its sessions or its editor state changed, and it was not archived."""
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual([n for n in os.listdir(os.path.dirname(self.f.src)) if n.startswith("archive-")], [])
+
+
+class CloneTest(CloneTestCase):
+    """Each test starts from a complete clone of the fixture to a new folder."""
+
+    def setUp(self):
+        super().setUp()
+        f = self.f
+        self.before = self.snapshot()
+        self.assertEqual(f.run("clone", f.src, f.dst), 0, f.output)
+        self.clone_output = f.output
+        self.report_md = read(os.path.join(f.record()["report_dir"], "report.md"))
+
+    def test_original_sessions_and_editor_state_are_untouched(self):
+        self.assertUntouched(self.before)
+        self.assertIn(f"origin\t{ORIGIN} (fetch)", git_out("-C", self.f.src, "remote", "-v"))
+
+    def test_copy_is_verified_without_dependencies_and_with_links(self):
+        f = self.f
+        self.assertRegex(f.record()["content_sha256"], "^[0-9a-f]{64}$")
+        self.assertIn(" identical files (hash ", self.clone_output)
+        self.assertEqual(read(os.path.join(f.dst, "a.txt")), "hola\n")
+        self.assertTrue(os.path.exists(paths.long_path(os.path.join(f.dst, f.deep_rel))))
+        for excluded in ("node_modules", os.path.join("packages", "p", "node_modules"), ".venv"):
+            self.assertFalse(os.path.exists(os.path.join(f.dst, excluded)), excluded)
+        link = paths.strip_long_prefix(os.readlink(os.path.join(f.dst, "link_internal")))
+        self.assertTrue(paths.same_path(link, os.path.join(f.dst, "sub")))
+        link = paths.strip_long_prefix(os.readlink(os.path.join(f.dst, "link_external")))
+        self.assertTrue(paths.same_path(link, f.external))
+
+    def test_copy_keeps_its_remotes_and_the_report_gives_the_commands(self):
+        f = self.f
+        self.assertIn(f"origin\t{ORIGIN} (fetch)", git_out("-C", f.dst, "remote", "-v"))
+        expected = [{"name": "origin", "url": ORIGIN},
+                    {"name": "upstream", "url": UPSTREAM, "push_url": UPSTREAM_PUSH}]
+        self.assertEqual(f.record()["remotes"], expected)
+        self.assertEqual(read_json(os.path.join(f.record()["report_dir"], "report.json"))["remotes"], expected)
+        for name in ("origin", "upstream"):
+            self.assertIn(f'git -C "{f.dst}" remote remove {name}', self.report_md)
+        self.assertIn("a push from the copy reaches the original's repository", self.report_md)
+        self.assertTrue(self.clone_output.rstrip().endswith(
+            "The copy still has 2 git remote(s) pointing to the original's repository; "
+            "phase 2 gives the commands to remove them."), self.clone_output)
+
+    def test_copy_has_no_sessions(self):
+        f = self.f
+        self.assertFalse(any(n.lower().startswith(f.dst_dir_name.lower()) for n in os.listdir(f.projects)))
+        self.assertNotIn(forward(f.dst).lower(), {k.lower() for k in read_json(f.config)["projects"]})
+
+    def test_note_replaces_the_inherited_section(self):
+        f = self.f
+        note = read(os.path.join(f.dst, "CLAUDE.local.md"))
+        self.assertIn(f"Cloned from `{f.src}` on {dt.date.today().isoformat()} with cc-move. The original is still "
+                      "in place and in use: never edit it from here.", note)
+        self.assertEqual(note.count(finalize.NOTE_START), 1)
+        self.assertIn("keep this", note)
+        self.assertIn("- Recreated: (pending, phase 2)", note)
+        self.assertIn("`node_modules`, `packages/p/node_modules`", note)
+        for gone in ("Earlier move", "C:\\old\\Proj", "Folder migration"):
+            self.assertNotIn(gone, note)
+        self.assertIn("CLAUDE.local.md", read(os.path.join(f.dst, ".git", "info", "exclude")))
+
+    def test_record_and_report(self):
+        f = self.f
+        record = f.record()
+        self.assertEqual((record["kind"], record["phase1"], record["phase2"], record["archive"]),
+                         ("clone", "ok", "pending", None))
+        self.assertNotIn("previous", record)
+        self.assertNotIn("backup", record)
+        report = read_json(os.path.join(record["report_dir"], "report.json"))
+        self.assertEqual([x["path"] for x in report["stale_refs"]], ["config.txt"])
+        self.assertIn("point INTO THE ORIGINAL", self.report_md)
+        self.assertNotIn("Archived original", self.report_md)
+
+    def test_suggests_phase_2_not_verify(self):
+        self.assertNotIn("verify", self.clone_output)
+        self.assertIn("Next: phase 2", self.clone_output)
+
+    def test_verify_undo_archive_and_relink_are_refused(self):
+        f = self.f
+        for args, message in ((("verify", f.dst), "it has no sessions to verify"),
+                              (("undo", f.dst), "To discard a clone, delete its folder"),
+                              (("archive", f.dst), "is never archived"),
+                              (("relink", f.src, f.dst), "Relinking would take them away")):
+            self.assertEqual(f.run(*args), 2, args)
+            self.assertIn(message, f.output)
+            self.assertIn(f"is a clone of {f.src}", f.output)
+        self.assertUntouched(self.before)
+        self.assertEqual(f.record()["phase1"], "ok")
+
+    def test_verify_all_status_and_phase2_work(self):
+        f = self.f
+        self.assertEqual(f.run("verify", "--all"), 0, f.output)
+        self.assertIn("There are no completed migrations.", f.output)
+        self.assertEqual(f.run("status"), 0, f.output)
+        self.assertIn("archived=n/a (clone)", f.output)
+        self.assertIn(f"clone of {f.src}", f.output)
+        self.assertEqual(f.run("phase2", f.dst, "--status", "ok", "--note", "done"), 0, f.output)
+        self.assertEqual(f.record()["phase2"], "ok")
+        self.assertUntouched(self.before)
+
+
+class CloneChainTest(CloneTestCase):
+    """A clone among moves: it is not part of the original's history, and a move of the clone starts a new one."""
+
+    def test_earlier_move_of_the_original_still_resolves(self):
+        f = self.f
+        self.assertEqual(f.run("migrate", f.src, f.dst), 0, f.output)
+        move = f.record()
+        copy = os.path.join(os.path.dirname(f.dst), "Proj copy")
+        self.assertEqual(f.run("clone", f.dst, copy), 0, f.output)
+        registry = Registry(f.state_dir)
+        self.assertEqual(registry.find(f.dst)["id"], move["id"])
+        self.assertIsNone(registry.next_move(move))
+        self.assertEqual(f.run("verify", f.dst), 0, f.output)
+        self.assertNotIn("Later moved", f.output)
+        self.assertEqual(f.run("verify", "--all"), 0, f.output)
+
+    def test_later_move_of_the_clone_is_not_an_intermediate_copy(self):
+        f = self.f
+        copy = os.path.join(os.path.dirname(f.src), "Proj copy")
+        self.assertEqual(f.run("clone", f.src, copy), 0, f.output)
+        self.assertEqual(f.run("migrate", copy, f.dst), 0, f.output)
+        record = f.record()
+        self.assertIsNone(record["previous"])
+        note = read(os.path.join(f.dst, "CLAUDE.local.md"))
+        self.assertIn(f"moved from `{copy}` with cc-move", note)
+        self.assertNotIn("intermediate copy", note)
+        self.assertNotIn("Cloned from", note.split("### Earlier move")[0])
+        self.assertEqual(f.run("verify", f.dst), 0, f.output)
+        self.assertTrue(os.path.isdir(f.src))
+
+
+class CloneCasesTest(CloneTestCase):
+    """Dry run, open sessions, a sibling destination and a .git file."""
+
+    def test_dry_run_changes_nothing(self):
+        f = self.f
+        before = self.snapshot()
+        self.assertEqual(f.run("clone", "--dry-run", f.src, f.dst), 0, f.output)
+        self.assertFalse(os.path.exists(f.dst))
+        self.assertUntouched(before)
+        self.assertEqual(Registry(f.state_dir).all(), [])
+        self.assertIn(f"remotes to remove (phase 2, by you): origin ({ORIGIN}), "
+                      f"upstream ({UPSTREAM}, push {UPSTREAM_PUSH})", f.output)
+        self.assertIn("The original, its Claude Code sessions and its VS Code state are not touched.", f.output)
+        self.assertIn("[dry-run] Nothing was modified.", f.output)
+
+    def test_open_session_and_editor_window_do_not_block(self):
+        f = self.f
+        write(os.path.join(f.claude, "sessions", "1.json"), json.dumps({"pid": os.getpid(), "cwd": f.src}))
+        lock = {"pid": os.getpid(), "workspaceFolders": [f.src], "ideName": "Visual Studio Code"}
+        write(os.path.join(f.claude, "ide", "1.lock"), json.dumps(lock))
+        before = self.snapshot()
+        self.assertEqual(f.run("clone", f.src, f.dst), 0, f.output)
+        self.assertUntouched(before)
+
+    def test_sibling_destination_is_not_an_old_path(self):
+        f = self.f
+        copy = os.path.join(os.path.dirname(f.src), "Proj copy")
+        write(os.path.join(f.src, "notes.txt"), f"the copy lives in {copy}\\x\n")
+        self.assertEqual(f.run("clone", f.src, copy), 0, f.output)
+        report = read_json(os.path.join(f.record()["report_dir"], "report.json"))
+        self.assertEqual([x["path"] for x in report["stale_refs"]], ["config.txt"])
+
+    def test_git_file_warns_and_lists_no_remotes(self):
+        f = self.f
+        git_dir = os.path.join(self.tmp, "gitdir")
+        os.rename(os.path.join(f.src, ".git"), git_dir)
+        write(os.path.join(f.src, ".git"), f"gitdir: {git_dir}\n")
+        self.assertEqual(f.run("clone", "--dry-run", f.src, f.dst), 0, f.output)
+        self.assertIn("the copy SHARES the git repository of the original", f.output)
+        before = self.snapshot()
+        config_before = read(os.path.join(git_dir, "config"))
+        self.assertEqual(f.run("clone", f.src, f.dst), 0, f.output)
+        self.assertIn("WARNING: `.git` is a file", f.output)
+        self.assertEqual(f.record()["remotes"], [])
+        self.assertNotIn("remote(s) pointing", f.output)
+        self.assertEqual(read(os.path.join(git_dir, "config")), config_before)
+        self.assertUntouched(before)
+
+
 class PendingLinksTest(FixtureTestCase):
     """A link to a dependency folder that is not copied (a monorepo's apps/m/node_modules -> root node_modules)."""
 
@@ -984,6 +1223,8 @@ class ConfirmHookTest(unittest.TestCase):
     def test_changing_commands_need_approval(self):
         for command in (r'python C:/p/cc_move.py migrate "C:\a" "C:\b"',
                         r'python C:/p/cc_move.py migrate "C:\a" "C:\b" --with-deps',
+                        r'python C:/p/cc_move.py clone "C:\a" "C:\a copy"',
+                        r'python C:/p/cc_move.py clone "C:\a" "C:\b" --with-deps',
                         r'python C:/p/cc_move.py --state-dir "C:\s" undo "C:\b"',
                         r'cd C:\x && py -3 C:\p\cc_move.py archive "C:\b"',
                         r'python C:/p/cc_move.py relink "C:\a" "C:\b"',
@@ -995,6 +1236,8 @@ class ConfirmHookTest(unittest.TestCase):
     def test_read_only_commands_do_not(self):
         for command in (r'python C:/p/cc_move.py migrate --dry-run "C:\a\archive" "C:\b"',
                         r'python C:/p/cc_move.py migrate "C:\a" "C:\b" --dry-run',
+                        r'python C:/p/cc_move.py clone --dry-run "C:\a" "C:\b"',
+                        r'python C:/p/cc_move.py clone "C:\a" "C:\b" --dry-run',
                         r'python C:/p/cc_move.py verify "C:\x\archive-2026-10-14-demo"',
                         r'python C:/p/cc_move.py status',
                         r'python C:/p/cc_move.py prune --dry-run',
